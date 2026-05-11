@@ -98,7 +98,7 @@ function StatusBadge({ status }: { status: UploadStatus }) {
 // ─── Upload Item ──────────────────────────────────────────────────────────────
 
 function UploadItem({ upload }: { upload: UploadFile }) {
-  const { cancelUpload, removeFile } = useUploadStore()
+  const { cancelUpload, removeFile, retryProcessing, cancelProcessing } = useUploadStore()
   const isUploading = upload.status === 'pending' || upload.status === 'uploading'
   const isProcessing = upload.status === 'processing'
   const showProgress = isUploading || isProcessing
@@ -178,14 +178,43 @@ function UploadItem({ upload }: { upload: UploadFile }) {
             <X className="h-3.5 w-3.5" />
           </button>
         )}
+        {isProcessing && upload.assetId && upload.versionId && (
+          <>
+            <button
+              onClick={() => retryProcessing(upload.id)}
+              className="h-6 w-6 flex items-center justify-center rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
+              title="Retry processing"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => cancelProcessing(upload.id)}
+              className="h-6 w-6 flex items-center justify-center rounded text-text-tertiary hover:text-status-error hover:bg-bg-hover transition-colors"
+              title="Cancel processing"
+            >
+              <Ban className="h-3.5 w-3.5" />
+            </button>
+          </>
+        )}
         {upload.status === 'failed' && (
-          <button
-            onClick={() => removeFile(upload.id)}
-            className="h-6 w-6 flex items-center justify-center rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
-            title="Dismiss"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+          <>
+            {upload.assetId && upload.versionId && (
+              <button
+                onClick={() => retryProcessing(upload.id)}
+                className="h-6 w-6 flex items-center justify-center rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
+                title="Retry processing"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+              </button>
+            )}
+            <button
+              onClick={() => removeFile(upload.id)}
+              className="h-6 w-6 flex items-center justify-center rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
+              title="Dismiss"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </>
         )}
       </div>
     </div>
@@ -195,7 +224,7 @@ function UploadItem({ upload }: { upload: UploadFile }) {
 // ─── Panel ────────────────────────────────────────────────────────────────────
 
 export function UploadsPanel() {
-  const { files, panelOpen, setPanelOpen, clearCompleted, fetchHistory, fetchMoreHistory, historyHasMore, historyLoading } = useUploadStore()
+  const { files, panelOpen, setPanelOpen, clearCompleted, fetchHistory, fetchMoreHistory, refreshProcessingItems, historyHasMore, historyLoading } = useUploadStore()
   const [filter, setFilter] = React.useState<FilterTab>('all')
   const scrollRef = React.useRef<HTMLDivElement>(null)
   const sentinelRef = React.useRef<HTMLDivElement>(null)
@@ -206,6 +235,20 @@ export function UploadsPanel() {
       fetchHistory()
     }
   }, [panelOpen, fetchHistory])
+
+  // Auto-rehydrate: while the panel is open and any item is in 'processing',
+  // poll the backend every 5s to catch state transitions that the SSE channel
+  // missed (e.g. when the user opened the panel before reconnecting, or while
+  // the backend was redeployed). The poll is a no-op when nothing is pending,
+  // so it costs nothing in the steady state.
+  const hasProcessing = files.some((f) => f.status === 'processing')
+  React.useEffect(() => {
+    if (!panelOpen || !hasProcessing) return
+    const id = window.setInterval(() => {
+      refreshProcessingItems()
+    }, 5000)
+    return () => window.clearInterval(id)
+  }, [panelOpen, hasProcessing, refreshProcessingItems])
 
   // Infinite scroll — IntersectionObserver on sentinel
   React.useEffect(() => {

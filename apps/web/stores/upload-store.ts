@@ -6,6 +6,14 @@ import type { AssetResponse } from '@/types'
 const CHUNK_SIZE = 10 * 1024 * 1024 // 10 MB
 const HISTORY_PAGE_SIZE = 20
 
+// EMA smoothing factor for speed calc (0..1, higher = more responsive, less smooth).
+// 0.3 strikes a balance — responsive enough to feel live, smooth enough to not jitter.
+const SPEED_EMA_ALPHA = 0.3
+
+// Minimum interval between progress UI updates (ms). XHR's onprogress fires fast;
+// throttling avoids React re-renders thrashing the panel.
+const PROGRESS_UPDATE_INTERVAL_MS = 200
+
 export type UploadStatus = 'pending' | 'uploading' | 'processing' | 'complete' | 'failed' | 'cancelled'
 
 export interface UploadFile {
@@ -24,6 +32,10 @@ export interface UploadFile {
   versionId?: string
   uploadId?: string
   createdAt: number // timestamp for grouping
+  // Live upload telemetry (set while status === 'uploading'):
+  bytesUploaded?: number  // bytes successfully PUT to S3 so far
+  speedBps?: number       // EMA-smoothed upload throughput, bytes/sec
+  etaSeconds?: number     // estimated seconds until upload completes
 }
 
 interface InitiateResponse {
@@ -97,8 +109,8 @@ function mergeHistoryAssets(existing: UploadFile[], assets: AssetResponse[]): Up
       return {
         id: `history-${a.id}`,
         fileName: file?.original_filename ?? a.name,
-        fileSize: file?.file_size_bytes ?? 0,
         fileType: file?.mime_type ?? mimeFromAssetType(a.asset_type),
+        fileSize: file?.file_size_bytes ?? 0,
         projectId: a.project_id,
         assetName: a.name,
         progress: 100,
@@ -110,6 +122,109 @@ function mergeHistoryAssets(existing: UploadFile[], assets: AssetResponse[]): Up
       }
     })
   return [...existing, ...newFiles]
+}
+
+/**
+ * PUT a Blob to a presigned URL with byte-level progress reporting.
+ *
+ * Uses XMLHttpRequest (not fetch) because only XHR exposes `upload.onprogress`
+ * events for outgoing data. Resolves with the response ETag so the caller can
+ * complete the S3 multipart upload.
+ *
+ * @param onProgress fires repeatedly during the upload with bytes sent in *this* chunk
+ *                   (NOT cumulative across chunks — caller adds the offset).
+ */
+function putBlobWithProgress(
+  url: string,
+  blob: Blob,
+  signal: AbortSignal,
+  onProgress: (bytesSentInThisChunk: number) => void,
+): Promise<{ etag: string }> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Upload cancelled', 'AbortError'))
+      return
+    }
+
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', url)
+
+    const onAbort = () => {
+      xhr.abort()
+      reject(new DOMException('Upload cancelled', 'AbortError'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded)
+    }
+    xhr.onload = () => {
+      signal.removeEventListener('abort', onAbort)
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const etag = xhr.getResponseHeader('ETag') ?? ''
+        resolve({ etag })
+      } else {
+        reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText || ''}`.trim()))
+      }
+    }
+    xhr.onerror = () => {
+      signal.removeEventListener('abort', onAbort)
+      reject(new Error('Network error during upload'))
+    }
+    xhr.ontimeout = () => {
+      signal.removeEventListener('abort', onAbort)
+      reject(new Error('Upload timed out'))
+    }
+
+    xhr.send(blob)
+  })
+}
+
+/**
+ * Tracks live upload telemetry across all parts of a single multipart upload.
+ * Exposes a `record(totalBytesSentSoFar)` method that updates speed (EMA-smoothed)
+ * and ETA, returning the latest values throttled by PROGRESS_UPDATE_INTERVAL_MS.
+ */
+function createProgressTracker(totalSize: number) {
+  let smoothedBps = 0
+  let lastSampleTime = Date.now()
+  let lastSampleBytes = 0
+  let lastUiUpdate = 0
+
+  return {
+    /**
+     * Returns a patch to apply to the UploadFile, or null if it's too soon
+     * since the last UI update (caller should skip the patch in that case).
+     */
+    sample(totalBytesSentSoFar: number): { bytesUploaded: number; speedBps: number; etaSeconds: number | undefined; progress: number } | null {
+      const now = Date.now()
+      const dtMs = now - lastSampleTime
+      if (dtMs <= 0) return null
+
+      // Always recompute the smoothed speed so we don't lose data between throttled updates.
+      const dt = dtMs / 1000
+      const deltaBytes = totalBytesSentSoFar - lastSampleBytes
+      if (deltaBytes > 0 && dt > 0) {
+        const instantBps = deltaBytes / dt
+        smoothedBps = smoothedBps === 0
+          ? instantBps
+          : SPEED_EMA_ALPHA * instantBps + (1 - SPEED_EMA_ALPHA) * smoothedBps
+        lastSampleTime = now
+        lastSampleBytes = totalBytesSentSoFar
+      }
+
+      // Throttle UI updates to avoid React thrashing.
+      if (now - lastUiUpdate < PROGRESS_UPDATE_INTERVAL_MS) return null
+      lastUiUpdate = now
+
+      const remaining = Math.max(0, totalSize - totalBytesSentSoFar)
+      const etaSeconds = smoothedBps > 0 ? remaining / smoothedBps : undefined
+      // Cap displayed upload progress at 95% — last 5% covers /upload/complete + processing handoff.
+      const progress = Math.min(95, Math.round((totalBytesSentSoFar / totalSize) * 95))
+
+      return { bytesUploaded: totalBytesSentSoFar, speedBps: smoothedBps, etaSeconds, progress }
+    },
+  }
 }
 
 const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = (set, get) => ({
@@ -159,7 +274,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
       let version_id: string | undefined
 
       try {
-        updateFile(id, { status: 'uploading' })
+        updateFile(id, { status: 'uploading', bytesUploaded: 0 })
 
         const initRes = await api.post<InitiateResponse>(
           '/upload/initiate',
@@ -181,6 +296,8 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
 
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
         const parts: Array<{ PartNumber: number; ETag: string }> = []
+        const tracker = createProgressTracker(file.size)
+        let bytesCompleted = 0 // bytes from fully-uploaded chunks
 
         for (let partNumber = 1; partNumber <= totalChunks; partNumber++) {
           if (controller.signal.aborted) {
@@ -190,6 +307,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
           const start = (partNumber - 1) * CHUNK_SIZE
           const end = Math.min(start + CHUNK_SIZE, file.size)
           const chunk = file.slice(start, end)
+          const chunkSize = end - start
 
           const { presigned_url } = await api.post<{ presigned_url: string }>('/upload/presign-part', {
             s3_key,
@@ -197,20 +315,18 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
             part_number: partNumber,
           })
 
-          const putResponse = await fetch(presigned_url, {
-            method: 'PUT',
-            body: chunk,
-            signal: controller.signal,
-          })
+          const { etag } = await putBlobWithProgress(
+            presigned_url,
+            chunk,
+            controller.signal,
+            (bytesThisChunk) => {
+              const patch = tracker.sample(bytesCompleted + bytesThisChunk)
+              if (patch) updateFile(id, patch)
+            },
+          )
 
-          if (!putResponse.ok) {
-            throw new Error(`Part ${partNumber} failed: ${putResponse.statusText}`)
-          }
-
-          const etag = putResponse.headers.get('ETag') ?? ''
           parts.push({ PartNumber: partNumber, ETag: etag })
-
-          updateFile(id, { progress: Math.round((partNumber / totalChunks) * 95) })
+          bytesCompleted += chunkSize
         }
 
         await api.post('/upload/complete', {
@@ -225,16 +341,29 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
         // For non-processable types (or if SSE isn't wired), mark complete directly.
         const isMedia = file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type.startsWith('image/')
         if (isMedia) {
-          updateFile(id, { progress: 100, status: 'processing', processingProgress: 0 })
+          updateFile(id, {
+            progress: 100,
+            status: 'processing',
+            processingProgress: 0,
+            bytesUploaded: file.size,
+            speedBps: undefined,
+            etaSeconds: undefined,
+          })
         } else {
-          updateFile(id, { progress: 100, status: 'complete' })
+          updateFile(id, {
+            progress: 100,
+            status: 'complete',
+            bytesUploaded: file.size,
+            speedBps: undefined,
+            etaSeconds: undefined,
+          })
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') {
-          updateFile(id, { status: 'cancelled', progress: 0 })
+          updateFile(id, { status: 'cancelled', progress: 0, speedBps: undefined, etaSeconds: undefined })
         } else {
           const message = err instanceof Error ? err.message : 'Upload failed'
-          updateFile(id, { status: 'failed', error: message })
+          updateFile(id, { status: 'failed', error: message, speedBps: undefined, etaSeconds: undefined })
         }
         // Notify backend so the version is marked failed (not stuck at uploading).
         // This ensures post-refresh history shows the item in "Failed", not "Active".
@@ -277,7 +406,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
       let s3_key: string | undefined
       let version_id: string | undefined
       try {
-        updateFile(id, { status: 'uploading' })
+        updateFile(id, { status: 'uploading', bytesUploaded: 0 })
         const initRes = await api.post<VersionInitiateResponse>(
           `/assets/${assetId}/versions`,
           {
@@ -295,27 +424,46 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
 
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
         const parts: Array<{ PartNumber: number; ETag: string }> = []
+        const tracker = createProgressTracker(file.size)
+        let bytesCompleted = 0
+
         for (let partNumber = 1; partNumber <= totalChunks; partNumber++) {
           if (controller.signal.aborted) throw new DOMException('Upload cancelled', 'AbortError')
           const start = (partNumber - 1) * CHUNK_SIZE
-          const chunk = file.slice(start, Math.min(start + CHUNK_SIZE, file.size))
+          const end = Math.min(start + CHUNK_SIZE, file.size)
+          const chunk = file.slice(start, end)
+          const chunkSize = end - start
           const { presigned_url } = await api.post<{ presigned_url: string }>('/upload/presign-part', {
             s3_key, upload_id, part_number: partNumber,
           })
-          const putResponse = await fetch(presigned_url, { method: 'PUT', body: chunk, signal: controller.signal })
-          if (!putResponse.ok) throw new Error(`Part ${partNumber} failed: ${putResponse.statusText}`)
-          parts.push({ PartNumber: partNumber, ETag: putResponse.headers.get('ETag') ?? '' })
-          updateFile(id, { progress: Math.round((partNumber / totalChunks) * 95) })
+          const { etag } = await putBlobWithProgress(
+            presigned_url,
+            chunk,
+            controller.signal,
+            (bytesThisChunk) => {
+              const patch = tracker.sample(bytesCompleted + bytesThisChunk)
+              if (patch) updateFile(id, patch)
+            },
+          )
+          parts.push({ PartNumber: partNumber, ETag: etag })
+          bytesCompleted += chunkSize
         }
 
         await api.post('/upload/complete', { s3_key, upload_id, asset_id: assetId, version_id, parts })
         const isMedia = file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type.startsWith('image/')
-        updateFile(id, { progress: 100, status: isMedia ? 'processing' : 'complete', processingProgress: 0 })
+        updateFile(id, {
+          progress: 100,
+          status: isMedia ? 'processing' : 'complete',
+          processingProgress: 0,
+          bytesUploaded: file.size,
+          speedBps: undefined,
+          etaSeconds: undefined,
+        })
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') {
-          updateFile(id, { status: 'cancelled', progress: 0 })
+          updateFile(id, { status: 'cancelled', progress: 0, speedBps: undefined, etaSeconds: undefined })
         } else {
-          updateFile(id, { status: 'failed', error: err instanceof Error ? err.message : 'Upload failed' })
+          updateFile(id, { status: 'failed', error: err instanceof Error ? err.message : 'Upload failed', speedBps: undefined, etaSeconds: undefined })
         }
         if (upload_id && s3_key && version_id) {
           api.post('/upload/abort', { s3_key, upload_id, version_id }).catch(() => {})
@@ -332,7 +480,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
     abortControllers[fileId]?.abort()
     set((s) => ({
       files: s.files.map((f) =>
-        f.id === fileId ? { ...f, status: 'cancelled' as const, progress: 0 } : f,
+        f.id === fileId ? { ...f, status: 'cancelled' as const, progress: 0, speedBps: undefined, etaSeconds: undefined } : f,
       ),
     }))
   },

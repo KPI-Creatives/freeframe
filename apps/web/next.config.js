@@ -4,6 +4,12 @@ const nextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
+  typescript: {
+    // Type checking is performed in CI and locally via `tsc --noEmit`; skipping
+    // it during the production build keeps the Docker build under memory limits
+    // on smaller Coolify hosts (the type-check phase spikes RAM hard).
+    ignoreBuildErrors: true,
+  },
   images: {
     remotePatterns: [
       {

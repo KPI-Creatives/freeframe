@@ -22,6 +22,7 @@ import {
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { GuestCommentInput } from '@/components/review/guest-comment-input'
+import { MarkdownViewer } from '@/components/viewers/markdown-viewer'
 import { FolderShareViewer } from '@/components/share/folder-share-viewer'
 import type { Asset, SharePermission, ProjectBranding, ShareLinkAppearance } from '@/types'
 
@@ -525,6 +526,14 @@ function ShareMediaViewer({ asset, token, streamUrl, streamLoading }: ShareMedia
         </div>
       )}
 
+      {asset.asset_type === 'document' && (
+        <MarkdownViewer
+          url={streamUrl}
+          loading={streamLoading}
+          className="w-full h-full"
+        />
+      )}
+
       {(asset.asset_type === 'image' || asset.asset_type === 'image_carousel') && (
         <div className="w-full h-full flex items-center justify-center p-4">
           <img
@@ -762,7 +771,7 @@ function ShareViewer({
       setStreamUrl(asset.stream_url)
       return
     }
-    if (asset.asset_type !== 'video' && asset.asset_type !== 'audio') return
+    if (asset.asset_type !== 'video' && asset.asset_type !== 'audio' && asset.asset_type !== 'document') return
     setStreamLoading(true)
     fetch(`${API_URL}/share/${token}/stream/${asset.id}`)
       .then((r) => (r.ok ? r.json() : null))

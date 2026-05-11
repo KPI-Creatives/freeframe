@@ -722,6 +722,7 @@ function ShareReviewScreen({
   const [VideoPlayer, setVideoPlayer] = React.useState<any>(null)
   const [ImageViewer, setImageViewer] = React.useState<any>(null)
   const [AudioPlayer, setAudioPlayer] = React.useState<any>(null)
+  const [MarkdownViewer, setMarkdownViewer] = React.useState<any>(null)
   const [CommentPanel, setCommentPanel] = React.useState<any>(null)
   const [CommentInput, setCommentInput] = React.useState<any>(null)
   const [loaded, setLoaded] = React.useState(false)
@@ -735,13 +736,15 @@ function ShareReviewScreen({
       import('@/components/review/audio-player'),
       import('@/components/review/comment-panel'),
       import('@/components/review/comment-input'),
-    ]).then(([provider, video, image, audio, comments, input]) => {
+      import('@/components/viewers/markdown-viewer'),
+    ]).then(([provider, video, image, audio, comments, input, markdown]) => {
       setProvider(() => provider.ReviewProvider)
       setVideoPlayer(() => video.VideoPlayer)
       setImageViewer(() => image.ImageViewer)
       setAudioPlayer(() => audio.AudioPlayer)
       setCommentPanel(() => comments.CommentPanel)
       setCommentInput(() => input.CommentInput)
+      setMarkdownViewer(() => markdown.MarkdownViewer)
       setLoaded(true)
     })
   }, [])
@@ -762,6 +765,7 @@ function ShareReviewScreen({
         VideoPlayer={VideoPlayer}
         ImageViewer={ImageViewer}
         AudioPlayer={AudioPlayer}
+        MarkdownViewer={MarkdownViewer}
         CommentPanel={CommentPanel}
         CommentInput={CommentInput}
       />
@@ -771,7 +775,7 @@ function ShareReviewScreen({
 
 function ShareReviewInner({
   token, shareSession, assetName, permission, allowDownload, onBack,
-  VideoPlayer, ImageViewer, AudioPlayer, CommentPanel, CommentInput,
+  VideoPlayer, ImageViewer, AudioPlayer, MarkdownViewer, CommentPanel, CommentInput,
 }: any) {
   // Import hooks from the review system
   const { useReview } = require('@/components/review/review-provider')
@@ -879,6 +883,8 @@ function ShareReviewInner({
             />
           ) : asset.asset_type === 'audio' && versionReady && AudioPlayer ? (
             <AudioPlayer asset={asset} version={currentVersion} comments={comments} className="flex-1" />
+          ) : asset.asset_type === 'document' && versionReady && MarkdownViewer ? (
+            <MarkdownViewer url={(asset as any).stream_url ?? null} className="flex-1" />
           ) : (asset.asset_type === 'image' || asset.asset_type === 'image_carousel') && versionReady && ImageViewer ? (
             <div className="relative flex-1 flex items-center justify-center p-4 overflow-hidden">
               <ImageViewer

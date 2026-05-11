@@ -7,6 +7,7 @@ import { ReviewProvider, useReview } from '@/components/review/review-provider'
 import { VideoPlayer } from '@/components/review/video-player'
 import { AudioPlayer } from '@/components/review/audio-player'
 import { ImageViewer } from '@/components/review/image-viewer'
+import { MarkdownViewer } from '@/components/viewers/markdown-viewer'
 import { AnnotationCanvas } from '@/components/review/annotation-canvas'
 import { AnnotationOverlay } from '@/components/review/annotation-overlay'
 import { CommentPanel } from '@/components/review/comment-panel'
@@ -39,6 +40,7 @@ const acceptByType: Record<string, string> = {
   audio: 'audio/*',
   image: 'image/*',
   image_carousel: 'image/*',
+  document: '.md,.markdown,text/markdown',
 }
 
 function ReviewScreenInner({ projectId }: { projectId: string }) {
@@ -308,6 +310,10 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
             />
           </div>
         )
+      case 'document':
+        return (
+          <DocumentReader assetId={asset.id} className="flex-1 min-h-0" />
+        )
       default:
         return null
     }
@@ -502,6 +508,43 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
       </div>
     </div>
   )
+}
+
+// ─── DocumentReader ──────────────────────────────────────────────────────────
+// Small wrapper that pulls a presigned URL for the .md file in S3/R2 and
+// hands it to MarkdownViewer. Mirrors how VideoPlayer fetches /assets/:id/stream
+// internally — keeps the switch statement in ReviewScreenInner symmetrical.
+interface DocumentReaderProps {
+  assetId: string
+  className?: string
+}
+function DocumentReader({ assetId, className }: DocumentReaderProps) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setUrl(null)
+    api
+      .get<{ url: string }>(`/assets/${assetId}/stream`)
+      .then((data) => {
+        if (cancelled) return
+        const resolved = data.url.startsWith('/')
+          ? `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}${data.url}`
+          : data.url
+        setUrl(resolved)
+      })
+      .catch(() => {
+        // MarkdownViewer renders an empty/error state when url stays null
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [assetId])
+  return <MarkdownViewer url={url} loading={loading} className={className} />
 }
 
 export default function ReviewPage({

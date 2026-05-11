@@ -323,7 +323,13 @@ def initiate_new_version(
     s3_key = f"raw/{asset.project_id}/{asset_id}/{version.id}/original{ext}"
     upload_id = create_multipart_upload(s3_key, body.mime_type)
 
-    file_type_map = {AssetType.image: FileType.image, AssetType.audio: FileType.audio, AssetType.video: FileType.video, AssetType.image_carousel: FileType.image}
+    file_type_map = {
+        AssetType.image: FileType.image,
+        AssetType.audio: FileType.audio,
+        AssetType.video: FileType.video,
+        AssetType.image_carousel: FileType.image,
+        AssetType.document: FileType.document,
+    }
     media_file = MediaFile(
         version_id=version.id,
         file_type=file_type_map.get(asset.asset_type, FileType.video),

@@ -97,8 +97,27 @@ function mimeFromAssetType(assetType: string): string {
     case 'audio': return 'audio/mpeg'
     case 'image':
     case 'image_carousel': return 'image/jpeg'
+    case 'document': return 'text/markdown'
     default: return 'application/octet-stream'
   }
+}
+
+// Document extensions we accept in v1. Mirrored on the backend in
+// apps/api/schemas/upload.py:ALLOWED_DOCUMENT_EXTENSIONS.
+const DOCUMENT_EXTENSIONS = ['.md', '.markdown']
+
+/**
+ * Normalise a File for upload. Browsers send no MIME (or text/plain) for .md
+ * files on many platforms; we fix that here so the backend can recognise the
+ * document via MIME alone. Returns the mime_type the backend should see.
+ */
+function deriveMimeType(file: File): string {
+  if (file.type && file.type !== 'text/plain') return file.type
+  const name = file.name.toLowerCase()
+  if (DOCUMENT_EXTENSIONS.some((ext) => name.endsWith(ext))) {
+    return 'text/markdown'
+  }
+  return file.type || 'application/octet-stream'
 }
 
 function mergeHistoryAssets(existing: UploadFile[], assets: AssetResponse[]): UploadFile[] {
@@ -247,7 +266,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
       id,
       fileName: file.name,
       fileSize: file.size,
-      fileType: file.type,
+      fileType: deriveMimeType(file),
       projectId,
       projectName,
       assetName,
@@ -341,7 +360,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
 
         // Upload done — backend now processes (transcode/convert).
         // For non-processable types (or if SSE isn't wired), mark complete directly.
-        const isMedia = file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type.startsWith('image/')
+        const isMedia = file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type.startsWith('image/') || DOCUMENT_EXTENSIONS.some((e) => file.name.toLowerCase().endsWith(e))
         if (isMedia) {
           updateFile(id, {
             progress: 100,
@@ -386,7 +405,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
       id,
       fileName: file.name,
       fileSize: file.size,
-      fileType: file.type,
+      fileType: deriveMimeType(file),
       projectId,
       assetName,
       progress: 0,
@@ -452,7 +471,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
         }
 
         await api.post('/upload/complete', { s3_key, upload_id, asset_id: assetId, version_id, parts })
-        const isMedia = file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type.startsWith('image/')
+        const isMedia = file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type.startsWith('image/') || DOCUMENT_EXTENSIONS.some((e) => file.name.toLowerCase().endsWith(e))
         updateFile(id, {
           progress: 100,
           status: isMedia ? 'processing' : 'complete',

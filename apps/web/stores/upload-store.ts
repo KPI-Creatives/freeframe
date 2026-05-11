@@ -67,6 +67,8 @@ interface UploadStore {
   startUpload: (file: File, projectId: string, assetName: string, projectName?: string, folderId?: string | null) => string
   startVersionUpload: (file: File, assetId: string, assetName: string, projectId: string) => string
   cancelUpload: (fileId: string) => void
+  retryProcessing: (fileId: string) => Promise<void>
+  cancelProcessing: (fileId: string) => Promise<void>
   removeFile: (fileId: string) => void
   clearCompleted: () => void
   fetchHistory: () => Promise<void>
@@ -483,6 +485,43 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
         f.id === fileId ? { ...f, status: 'cancelled' as const, progress: 0, speedBps: undefined, etaSeconds: undefined } : f,
       ),
     }))
+  },
+
+  retryProcessing: async (fileId) => {
+    const file = get().files.find((f) => f.id === fileId)
+    if (!file?.assetId || !file?.versionId) return
+    // Optimistically flip to processing so the UI updates immediately.
+    set((s) => ({
+      files: s.files.map((f) =>
+        f.id === fileId
+          ? { ...f, status: 'processing' as const, processingProgress: 0, error: undefined }
+          : f,
+      ),
+    }))
+    try {
+      await api.post(`/assets/${file.assetId}/versions/${file.versionId}/retry-processing`, {})
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Retry failed'
+      set((s) => ({
+        files: s.files.map((f) => (f.id === fileId ? { ...f, status: 'failed' as const, error: message } : f)),
+      }))
+    }
+  },
+
+  cancelProcessing: async (fileId) => {
+    const file = get().files.find((f) => f.id === fileId)
+    if (!file?.assetId || !file?.versionId) return
+    // Optimistic update — call backend, then sync.
+    set((s) => ({
+      files: s.files.map((f) =>
+        f.id === fileId ? { ...f, status: 'failed' as const, error: 'Cancelled by user' } : f,
+      ),
+    }))
+    try {
+      await api.post(`/assets/${file.assetId}/versions/${file.versionId}/cancel-processing`, {})
+    } catch {
+      // If backend rejects, the next refreshProcessingItems will reconcile.
+    }
   },
 
   removeFile: (fileId) => {

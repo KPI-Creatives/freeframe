@@ -18,8 +18,27 @@ CONTENT_TYPE_MAP = {
 }
 
 def _is_aws_s3() -> bool:
-    """Check if using AWS S3 (vs MinIO/local). Controlled by S3_STORAGE env var."""
-    return settings.s3_storage.lower() == "s3"
+    """Check whether the configured S3 endpoint is AWS S3.
+
+    AWS S3 doesn't support a custom endpoint_url — boto3 builds the URL from
+    `<bucket>.s3.<region>.amazonaws.com`. Any other S3-compatible provider
+    (Cloudflare R2, Backblaze B2, DigitalOcean Spaces, MinIO, SeaweedFS, ...)
+    requires an explicit `endpoint_url=` to be passed to boto3.
+
+    Detection (in priority order):
+        1. S3_ENDPOINT unset or empty → assume AWS (default).
+        2. S3_ENDPOINT host contains 'amazonaws.com' → AWS.
+        3. Otherwise → non-AWS provider, must use endpoint_url.
+
+    Note: this previously checked only `S3_STORAGE`, which silently ignored
+    `S3_ENDPOINT` for any value of `S3_STORAGE` other than 'minio'. Setting
+    `S3_STORAGE=s3` with an R2/B2/Spaces endpoint crashed the API on startup
+    with `EndpointConnectionError: <bucket>.s3.<region>.amazonaws.com`.
+    """
+    endpoint = (settings.s3_endpoint or "").lower()
+    if not endpoint:
+        return True
+    return "amazonaws.com" in endpoint
 
 def get_s3_client():
     """
@@ -209,8 +228,8 @@ def generate_presigned_get_url(s3_key: str, expires_in: int = 3600, download_fil
     params: dict = {"Bucket": settings.s3_bucket, "Key": s3_key}
     if download_filename:
         safe_name = re.sub(r'[\x00-\x1f\x7f]', '', download_filename)
-        safe_name = safe_name.replace('\\', '\\\\').replace('"', '\\"')
-        params["ResponseContentDisposition"] = f'attachment; filename="{safe_name}"'
+        safe_name = safe_name.replace('\\', '\\\\').replace('"', '\\\"')
+        params["ResponseContentDisposition"] = f'attachment; filename=\"{safe_name}\"'
     return s3.generate_presigned_url(
         "get_object",
         Params=params,

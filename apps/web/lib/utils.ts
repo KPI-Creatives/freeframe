@@ -62,6 +62,35 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * Format upload throughput (bytes per second) into a human-readable string.
+ * Returns '' for non-positive / non-finite values so callers can render safely.
+ * e.g. 5_242_880 → "5.0 MB/s"
+ */
+export function formatSpeed(bytesPerSec: number): string {
+  if (!Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return ''
+  return `${formatBytes(bytesPerSec)}/s`
+}
+
+/**
+ * Format remaining seconds into a short ETA string.
+ * Returns '' when the value is unusable (e.g. 0 / NaN / Infinity).
+ * e.g. 45 → "45s", 90 → "1m 30s", 7320 → "2h 2m"
+ */
+export function formatEta(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return ''
+  const s = Math.round(seconds)
+  if (s < 60) return `${s}s`
+  if (s < 3600) {
+    const m = Math.floor(s / 60)
+    const rem = s % 60
+    return rem ? `${m}m ${rem}s` : `${m}m`
+  }
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return m ? `${h}h ${m}m` : `${h}h`
+}
+
+/**
  * Format an ISO date string into a relative time string
  * e.g. "2 hours ago", "3 days ago", "just now"
  */

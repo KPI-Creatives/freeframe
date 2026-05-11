@@ -18,7 +18,8 @@ from ..schemas.upload import (
     InitiateUploadRequest, InitiateUploadResponse,
     PresignPartRequest, PresignPartResponse,
     CompleteUploadRequest, CompleteUploadResponse, AbortUploadRequest,
-    ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, mime_to_asset_type,
+    ALLOWED_MIME_TYPES, ALLOWED_DOCUMENT_EXTENSIONS,
+    MAX_FILE_SIZE_BYTES, MAX_DOCUMENT_SIZE_BYTES, mime_to_asset_type,
 )
 
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -29,10 +30,17 @@ def initiate_upload(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Validate mime type
-    if body.mime_type not in ALLOWED_MIME_TYPES:
+    # Validate mime type — with a fallback for documents where the browser
+    # sends text/plain (or no mapping) for a .md file.
+    ext = os.path.splitext(body.original_filename)[1].lower()
+    is_doc_by_ext = ext in ALLOWED_DOCUMENT_EXTENSIONS
+    if body.mime_type not in ALLOWED_MIME_TYPES and not is_doc_by_ext:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {body.mime_type}")
-    if body.file_size_bytes > MAX_FILE_SIZE_BYTES:
+    # Documents have a smaller hard-cap than media.
+    if is_doc_by_ext or body.mime_type in ("text/markdown", "text/x-markdown"):
+        if body.file_size_bytes > MAX_DOCUMENT_SIZE_BYTES:
+            raise HTTPException(status_code=400, detail="Document exceeds 5MB limit")
+    elif body.file_size_bytes > MAX_FILE_SIZE_BYTES:
         raise HTTPException(status_code=400, detail="File exceeds 10GB limit")
 
     # Verify project access (editor or above)
@@ -49,7 +57,7 @@ def initiate_upload(
         if asset.project_id != body.project_id:
             raise HTTPException(status_code=400, detail="Asset does not belong to the specified project")
     else:
-        asset_type = mime_to_asset_type(body.mime_type)
+        asset_type = mime_to_asset_type(body.mime_type, body.original_filename)
         asset = Asset(
             project_id=body.project_id,
             name=body.asset_name,
@@ -84,7 +92,13 @@ def initiate_upload(
     upload_id = create_multipart_upload(s3_key, body.mime_type)
 
     # Create MediaFile record
-    file_type_map = {AssetType.image: FileType.image, AssetType.audio: FileType.audio, AssetType.video: FileType.video, AssetType.image_carousel: FileType.image}
+    file_type_map = {
+        AssetType.image: FileType.image,
+        AssetType.audio: FileType.audio,
+        AssetType.video: FileType.video,
+        AssetType.image_carousel: FileType.image,
+        AssetType.document: FileType.document,
+    }
     media_file = MediaFile(
         version_id=version.id,
         file_type=file_type_map.get(asset.asset_type, FileType.video),
@@ -144,6 +158,15 @@ def complete_upload(
 
     # Then complete S3 multipart
     complete_multipart_upload(body.s3_key, body.upload_id, [p.model_dump() for p in body.parts])
+
+    # Documents skip the transcoding pipeline entirely — they live in S3 as the
+    # raw file and the frontend reads them via a presigned URL. We mark them
+    # ready right here so the UI shows them as viewable immediately.
+    asset = db.query(Asset).filter(Asset.id == body.asset_id, Asset.deleted_at.is_(None)).first()
+    if asset and asset.asset_type == AssetType.document:
+        version.processing_status = ProcessingStatus.ready
+        db.commit()
+        return CompleteUploadResponse(status="ready", asset_id=body.asset_id, version_id=body.version_id)
 
     version.processing_status = ProcessingStatus.processing
     db.commit()

@@ -589,7 +589,7 @@ export default function ProjectDetailPage() {
         {/* Storage indicator — matches global sidebar bottom section (p-2 + space-y-1) */}
         {(() => {
           const used = project?.storage_bytes ?? 0;
-          const limit = 10 * 1024 * 1024 * 1024; // 10 GB default limit
+          const limit = 5 * 1024 * 1024 * 1024 * 1024; // 5 TB soft cap (cosmetic; R2 is pay-as-you-go, no real quota)
           const pct = limit > 0 ? Math.min((used / limit) * 100, 100) : 0;
           const isCritical = pct >= 90;
           const isWarning = pct >= 80;

@@ -8,6 +8,7 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
+  X,
   Download,
   ArrowLeft,
   Columns2,
@@ -345,6 +346,7 @@ interface ShareTopBarProps {
   onToggleSidebar: () => void
   onBack?: () => void
   branding: ProjectBranding | null
+  commentCount?: number
 }
 
 function ShareTopBar({
@@ -358,6 +360,7 @@ function ShareTopBar({
   onToggleSidebar,
   onBack,
   branding,
+  commentCount = 0,
 }: ShareTopBarProps) {
   const [downloading, setDownloading] = React.useState(false)
 
@@ -444,7 +447,7 @@ function ShareTopBar({
         <button
           onClick={onToggleSidebar}
           className={cn(
-            'flex items-center justify-center h-8 w-8 rounded-md transition-colors',
+            'relative flex items-center justify-center h-8 w-8 rounded-md transition-colors',
             sidebarOpen
               ? 'bg-white/10 text-white'
               : 'text-zinc-500 hover:text-white hover:bg-white/10',
@@ -452,6 +455,11 @@ function ShareTopBar({
           title="Toggle panel"
         >
           <Columns2 className="h-4 w-4" />
+          {commentCount > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-purple-600 text-[10px] font-semibold text-white flex items-center justify-center tabular-nums">
+              {commentCount}
+            </span>
+          )}
         </button>
       </div>
     </div>
@@ -552,6 +560,7 @@ interface ShareRightPanelProps {
   permission: SharePermission
   commentRefreshKey: number
   onCommentPosted: () => void
+  onClose?: () => void
 }
 
 function ShareRightPanel({
@@ -560,13 +569,34 @@ function ShareRightPanel({
   permission,
   commentRefreshKey,
   onCommentPosted,
+  onClose,
 }: ShareRightPanelProps) {
   const [activeTab, setActiveTab] = React.useState<'comments' | 'fields'>('comments')
 
   return (
-    <div className="w-[360px] flex flex-col border-l border-white/[0.06] bg-[#141416] shrink-0 animate-in slide-in-from-right-2 duration-150">
+    <div
+      className={cn(
+        // Mobile: fixed-position drawer pinned to right edge so the video keeps
+        // the rest of the viewport. A scrim sibling handles the dim background.
+        'fixed inset-y-0 right-0 z-50 w-[88%] max-w-[420px] flex flex-col bg-[#141416] shadow-2xl shadow-black/50',
+        // Desktop (>=md): revert to the original side-column layout.
+        'md:static md:w-[360px] md:max-w-none md:border-l md:border-white/[0.06] md:shadow-none md:z-auto',
+        'shrink-0 animate-in slide-in-from-right-2 duration-150',
+      )}
+    >
+      {/* Mobile-only close button. On desktop the top-bar toggle handles this. */}
+      {onClose && (
+        <button
+          onClick={onClose}
+          className="md:hidden absolute top-2.5 right-2.5 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-white/5 text-zinc-300 hover:text-white hover:bg-white/10"
+          aria-label="Close panel"
+        >
+          <X className="h-5 w-5" />
+        </button>
+      )}
+
       {/* Tabs */}
-      <div className="px-4 pt-3 pb-2 shrink-0">
+      <div className="px-4 pt-3 pb-2 pr-14 md:pr-4 shrink-0">
         <div className="flex items-center bg-white/5 rounded-lg p-0.5">
           <button
             onClick={() => setActiveTab('comments')}
@@ -706,7 +736,25 @@ function ShareViewer({
   const [streamUrl, setStreamUrl] = React.useState<string | null>(asset.stream_url ?? null)
   const [streamLoading, setStreamLoading] = React.useState(false)
   const [commentKey, setCommentKey] = React.useState(0)
-  const [sidebarOpen, setSidebarOpen] = React.useState(true)
+  // Closed by default — opened by an effect below only on >=md so the video is
+  // the primary view on phones and the 360px sidebar doesn't squash it.
+  const [sidebarOpen, setSidebarOpen] = React.useState(false)
+  const [commentCount, setCommentCount] = React.useState(0)
+
+  React.useEffect(() => {
+    if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+      setSidebarOpen(true)
+    }
+  }, [])
+
+  // Comment-count badge for the top-bar toggle and the mobile FAB. Refreshes
+  // whenever commentKey bumps (i.e. after a guest posts).
+  React.useEffect(() => {
+    fetch(`${API_URL}/share/${token}/comments`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setCommentCount(d?.comments?.length ?? 0))
+      .catch(() => {})
+  }, [token, commentKey])
 
   // For video/audio assets, get a stream URL if not already provided
   React.useEffect(() => {
@@ -742,10 +790,11 @@ function ShareViewer({
         onToggleSidebar={() => setSidebarOpen((p) => !p)}
         onBack={onBack}
         branding={branding}
+        commentCount={commentCount}
       />
 
       {/* Main content: viewer + sidebar */}
-      <div className="flex flex-1 overflow-hidden min-h-0">
+      <div className="relative flex flex-1 overflow-hidden min-h-0">
         {/* Left: full-screen media viewer */}
         <ShareMediaViewer
           asset={asset}
@@ -754,7 +803,16 @@ function ShareViewer({
           streamLoading={streamLoading}
         />
 
-        {/* Right: comments panel */}
+        {/* Mobile-only scrim — tap to dismiss the drawer. */}
+        {sidebarOpen && (
+          <div
+            onClick={() => setSidebarOpen(false)}
+            className="md:hidden absolute inset-0 bg-black/60 z-40"
+            aria-hidden="true"
+          />
+        )}
+
+        {/* Right: comments panel. Side-column on desktop, drawer on mobile. */}
         {sidebarOpen && (
           <ShareRightPanel
             token={token}
@@ -762,7 +820,26 @@ function ShareViewer({
             permission={permission}
             commentRefreshKey={commentKey}
             onCommentPosted={() => setCommentKey((k) => k + 1)}
+            onClose={() => setSidebarOpen(false)}
           />
+        )}
+
+        {/* Mobile FAB — only when the drawer is closed. Surfaces the comments
+            affordance that's otherwise hidden behind a small top-bar toggle. */}
+        {!sidebarOpen && (
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="md:hidden absolute bottom-4 right-4 z-30 flex items-center gap-2 rounded-full bg-purple-600 hover:bg-purple-700 px-4 py-3 text-sm font-medium text-white shadow-lg shadow-black/40"
+            aria-label="Open comments panel"
+          >
+            <MessageSquare className="h-4 w-4" />
+            <span>Comments</span>
+            {commentCount > 0 && (
+              <span className="rounded-full bg-white/20 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums">
+                {commentCount}
+              </span>
+            )}
+          </button>
         )}
       </div>
 

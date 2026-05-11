@@ -5,11 +5,17 @@ from ..models.asset import AssetType
 ALLOWED_MIME_TYPES = {
     # Images
     "image/jpeg", "image/png", "image/webp", "image/heic", "image/tiff", "image/gif",
-    # Audio
-    "audio/mpeg", "audio/wav", "audio/flac", "audio/aac", "audio/ogg", "audio/x-m4a",
-    # Video
-    "video/mp4", "video/quicktime", "video/x-msvideo", "video/x-matroska",
-    "video/webm", "video/mpeg", "video/x-ms-wmv",
+    # Audio — include both canonical and legacy aliases used by different browsers/OSes
+    "audio/mpeg", "audio/mp3",
+    "audio/wav", "audio/wave", "audio/x-wav", "audio/vnd.wave",
+    "audio/flac", "audio/x-flac",
+    "audio/aac", "audio/x-aac",
+    "audio/ogg", "audio/vorbis",
+    "audio/x-m4a", "audio/m4a", "audio/mp4", "audio/aiff", "audio/x-aiff",
+    "audio/webm",
+    # Video — include common aliases
+    "video/mp4", "video/quicktime", "video/x-msvideo", "video/avi",
+    "video/x-matroska", "video/webm", "video/mpeg", "video/x-ms-wmv",
 }
 
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB

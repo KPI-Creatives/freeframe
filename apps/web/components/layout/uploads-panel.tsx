@@ -14,7 +14,7 @@ import {
   Ban,
   Cog,
 } from 'lucide-react'
-import { cn, formatBytes, formatRelativeTime } from '@/lib/utils'
+import { cn, formatBytes, formatEta, formatRelativeTime, formatSpeed } from '@/lib/utils'
 import { useUploadStore, type UploadFile, type UploadStatus } from '@/stores/upload-store'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -61,6 +61,19 @@ function groupByDate(files: UploadFile[]): { label: string; items: UploadFile[] 
   }
 
   return Object.entries(groups).map(([label, items]) => ({ label, items }))
+}
+
+/**
+ * Build the live "Uploading X% • 4.2 MB/s • 1m 30s remaining" string.
+ * Falls back gracefully when speed/eta aren't available yet (first ~200ms).
+ */
+function formatUploadingDetail(upload: UploadFile): string {
+  const parts: string[] = [`Uploading ${upload.progress}%`]
+  const speed = upload.speedBps !== undefined ? formatSpeed(upload.speedBps) : ''
+  if (speed) parts.push(speed)
+  const eta = upload.etaSeconds !== undefined ? formatEta(upload.etaSeconds) : ''
+  if (eta) parts.push(`${eta} remaining`)
+  return parts.join(' • ')
 }
 
 // ─── Status Badge ─────────────────────────────────────────────────────────────
@@ -125,8 +138,8 @@ function UploadItem({ upload }: { upload: UploadFile }) {
         {/* Detail line */}
         <div className="flex items-center gap-1 mt-1">
           {upload.status === 'uploading' && (
-            <span className="text-[11px] text-text-secondary">
-              Uploading {upload.progress}%
+            <span className="text-[11px] text-text-secondary truncate">
+              {formatUploadingDetail(upload)}
             </span>
           )}
           {upload.status === 'processing' && (

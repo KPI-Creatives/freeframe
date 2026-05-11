@@ -387,3 +387,77 @@ def get_assignment(
         "assignee_id": str(asset.assignee_id) if asset.assignee_id else None,
         "due_date": asset.due_date.isoformat() if asset.due_date else None,
     }
+
+
+@router.post("/assets/{asset_id}/versions/{version_id}/retry-processing")
+def retry_version_processing(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-enqueue Celery transcode for a stuck or failed version.
+
+    Useful when a previous worker died mid-process or the user wants a
+    forced retry. Sets the version back to `processing` and dispatches
+    the same Celery task as the original upload-complete flow.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.deleted_at.is_(None)).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    require_project_role(db, asset.project_id, current_user, ProjectRole.editor)
+
+    version = db.query(AssetVersion).filter(
+        AssetVersion.id == version_id,
+        AssetVersion.asset_id == asset_id,
+        AssetVersion.deleted_at.is_(None),
+    ).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+    if version.processing_status == ProcessingStatus.ready:
+        raise HTTPException(status_code=409, detail="Version is already ready")
+    if version.processing_status == ProcessingStatus.uploading:
+        raise HTTPException(status_code=409, detail="Upload not complete yet")
+
+    version.processing_status = ProcessingStatus.processing
+    db.commit()
+
+    from ..tasks.transcode_tasks import process_asset
+    from ..tasks.celery_app import send_task_safe
+    send_task_safe(process_asset, str(asset_id), str(version_id))
+
+    return {"ok": True, "asset_id": str(asset_id), "version_id": str(version_id), "status": "processing"}
+
+
+@router.post("/assets/{asset_id}/versions/{version_id}/cancel-processing")
+def cancel_version_processing(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mark a stuck/processing version as failed so the user can dismiss it.
+
+    Does not delete the version or its DB rows — only flips the status so the
+    UI's Failed tab picks it up. The user can subsequently dismiss it or
+    re-upload from scratch.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.deleted_at.is_(None)).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    require_project_role(db, asset.project_id, current_user, ProjectRole.editor)
+
+    version = db.query(AssetVersion).filter(
+        AssetVersion.id == version_id,
+        AssetVersion.asset_id == asset_id,
+        AssetVersion.deleted_at.is_(None),
+    ).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+    if version.processing_status == ProcessingStatus.ready:
+        raise HTTPException(status_code=409, detail="Version is already ready — nothing to cancel")
+
+    version.processing_status = ProcessingStatus.failed
+    db.commit()
+
+    return {"ok": True, "asset_id": str(asset_id), "version_id": str(version_id), "status": "failed"}

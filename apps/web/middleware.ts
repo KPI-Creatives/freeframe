@@ -2,7 +2,12 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
 const PUBLIC_ROUTES = ['/login', '/setup']
-const PUBLIC_PREFIXES = ['/invite/', '/share/']
+// '/stream/' is public from the middleware's perspective because the FastAPI
+// HLS proxy router validates its own short-lived JWT (?token=...) on every
+// segment/manifest request. Without this, share-link viewers (who have no
+// session cookies) get bounced to /login when the <video> tag tries to fetch
+// /stream/hls/master.m3u8.
+const PUBLIC_PREFIXES = ['/invite/', '/share/', '/stream/']
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 

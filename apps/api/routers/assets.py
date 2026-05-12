@@ -666,15 +666,34 @@ def send_asset_to_client(
 
     # ── Email the client ─────────────────────────────────────────────────
     share_url = f"{settings.frontend_url}/share/{token}"
-    send_task_safe(
-        send_share_email,
-        to_email=payload.recipient_email,
-        sharer_name=current_user.name or "KPI Creatives",
-        asset_name=asset.name,
-        asset_link=share_url,
-        permission=permission.value,
-        message=payload.message,
+    import logging as _logging
+    _log = _logging.getLogger("send_to_client")
+    _log.info(
+        "send-to-client: enqueueing email to=%s sharer=%s asset=%s share=%s perm=%s",
+        payload.recipient_email,
+        (current_user.name or current_user.email),
+        asset.name,
+        share_url,
+        permission.value,
     )
+    try:
+        send_task_safe(
+            send_share_email,
+            to_email=payload.recipient_email,
+            sharer_name=current_user.name or "KPI Creatives",
+            asset_name=asset.name,
+            asset_link=share_url,
+            permission=permission.value,
+            message=payload.message,
+        )
+        _log.info("send-to-client: email enqueue OK to=%s", payload.recipient_email)
+    except Exception:
+        # send_task_safe swallows errors in its background thread, so this
+        # branch is mostly unreachable — but if the import/threading itself
+        # fails synchronously, surface it in the logs without breaking the
+        # phase transition (the share-link already exists, producer can
+        # copy the URL).
+        _log.exception("send-to-client: email enqueue failed to=%s", payload.recipient_email)
 
     return {
         "asset_id": str(asset.id),

@@ -1,8 +1,8 @@
 'use client'
 
 /**
- * Send-to-Client modal — the single atomic action used by producers to
- * transition an asset from internal review to client review. One click does:
+ * Send-to-Client modal — single atomic action used by producers to transition
+ * an asset from internal review to client review. One submit does:
  *
  *   1. flip Asset.phase to 'client'
  *   2. snapshot the current latest version as client_baseline_version_id
@@ -10,11 +10,18 @@
  *   4. queue a Resend email to the client
  *   5. hand the producer back the share URL with a Copy button for fallback
  *
- * Visible only to producer+ users (the backend gate enforces this regardless).
+ * UX principles after the first feedback round:
+ *
+ *   * Success state takes over the WHOLE modal — big check, big share URL,
+ *     Copy button and an Open-in-new-tab button. Impossible to miss.
+ *   * The share-link is the durable artifact. The email is best-effort —
+ *     copy the URL even if you suspect the email got eaten by spam.
+ *   * The browser console gets a log line on every submit (response + url).
+ *   * Errors render as a red banner inside the dialog, NOT a silent failure.
  */
 import * as React from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
-import { X, Send, Copy, Check, Loader2 } from 'lucide-react'
+import { X, Send, Copy, Check, Loader2, ExternalLink, CheckCircle2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -53,11 +60,11 @@ export function SendToClientDialog({
   const [message, setMessage] = React.useState('')
 
   const [submitting, setSubmitting] = React.useState(false)
-  const [shareUrl, setShareUrl] = React.useState<string | null>(null)
+  const [result, setResult] = React.useState<SendResponse | null>(null)
   const [copied, setCopied] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
-  // Reset on open
+  // Reset when the modal opens.
   React.useEffect(() => {
     if (open) {
       setRecipientEmail('')
@@ -65,7 +72,7 @@ export function SendToClientDialog({
       setExpiresInDays('')
       setPassword('')
       setMessage('')
-      setShareUrl(null)
+      setResult(null)
       setCopied(false)
       setError(null)
     }
@@ -79,27 +86,40 @@ export function SendToClientDialog({
     setSubmitting(true)
     setError(null)
     try {
-      const res = await api.post<SendResponse>(`/assets/${assetId}/send-to-client`, {
+      const payload = {
         recipient_email: recipientEmail.trim(),
         permission,
         expires_in_days: typeof expiresInDays === 'number' ? expiresInDays : null,
         password: password.trim() || null,
         message: message.trim() || null,
-      })
-      setShareUrl(res.share_url)
+      }
+      // eslint-disable-next-line no-console
+      console.log('[send-to-client] POST payload:', payload)
+      const res = await api.post<SendResponse>(`/assets/${assetId}/send-to-client`, payload)
+      // eslint-disable-next-line no-console
+      console.log('[send-to-client] response:', res)
+      if (!res || !res.share_url) {
+        throw new Error(
+          `Unexpected response shape — got ${JSON.stringify(res).slice(0, 200)}`,
+        )
+      }
+      setResult(res)
       onSuccess?.()
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Send failed')
+      const msg = e instanceof Error ? e.message : 'Send failed'
+      // eslint-disable-next-line no-console
+      console.error('[send-to-client] error:', e)
+      setError(msg)
     } finally {
       setSubmitting(false)
     }
   }
 
   const handleCopy = () => {
-    if (!shareUrl) return
-    navigator.clipboard.writeText(shareUrl)
+    if (!result?.share_url) return
+    navigator.clipboard.writeText(result.share_url)
     setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    setTimeout(() => setCopied(false), 2500)
   }
 
   return (
@@ -108,45 +128,57 @@ export function SendToClientDialog({
         <Dialog.Overlay className="fixed inset-0 bg-black/60 z-50" />
         <Dialog.Content
           className={cn(
-            'fixed left-1/2 top-1/2 z-50 w-[min(92vw,520px)] -translate-x-1/2 -translate-y-1/2',
+            'fixed left-1/2 top-1/2 z-50 w-[min(94vw,560px)] -translate-x-1/2 -translate-y-1/2',
             'rounded-xl border border-border bg-bg-secondary p-6 shadow-2xl',
           )}
         >
-          <div className="flex items-start justify-between gap-3 mb-4">
-            <div>
-              <Dialog.Title className="text-lg font-semibold text-text-primary">
-                Send to client review
-              </Dialog.Title>
-              <Dialog.Description className="text-xs text-text-tertiary mt-0.5">
-                {assetName}
-              </Dialog.Description>
+          {/* Header is suppressed in the success state — the big banner IS the header. */}
+          {!result && (
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div>
+                <Dialog.Title className="text-lg font-semibold text-text-primary">
+                  Send to client review
+                </Dialog.Title>
+                <Dialog.Description className="text-xs text-text-tertiary mt-0.5">
+                  {assetName}
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button className="rounded-md p-1 text-text-tertiary hover:bg-bg-hover hover:text-text-primary">
+                  <X className="h-4 w-4" />
+                </button>
+              </Dialog.Close>
             </div>
-            <Dialog.Close asChild>
-              <button className="rounded-md p-1 text-text-tertiary hover:bg-bg-hover hover:text-text-primary">
-                <X className="h-4 w-4" />
-              </button>
-            </Dialog.Close>
-          </div>
+          )}
 
-          {shareUrl ? (
-            // ── Success view ───────────────────────────────────────────────
-            <div className="space-y-4">
-              <div className="rounded-md bg-status-success/10 border border-status-success/30 p-3">
-                <p className="text-sm text-status-success font-medium">
-                  ✓ Sent to {recipientEmail}
-                </p>
-                <p className="text-xs text-text-secondary mt-1">
-                  Asset moved to client phase. Email queued. Share link ready
-                  for any fallback channel.
+          {result ? (
+            // ── Success view — takes over the whole modal ─────────────────
+            <div className="space-y-5">
+              <div className="flex flex-col items-center text-center gap-2 py-2">
+                <div className="rounded-full bg-status-success/15 p-3">
+                  <CheckCircle2 className="h-8 w-8 text-status-success" />
+                </div>
+                <Dialog.Title className="text-lg font-semibold text-text-primary">
+                  Sent to client review
+                </Dialog.Title>
+                <Dialog.Description className="text-sm text-text-secondary">
+                  Asset moved to <strong className="text-text-primary">client phase</strong>.
+                  Email queued to <strong className="text-text-primary">{recipientEmail}</strong>.
+                </Dialog.Description>
+                <p className="text-xs text-text-tertiary mt-2 max-w-[400px]">
+                  If the email doesn't arrive within a few minutes, copy the
+                  share URL below and send it via your preferred channel —
+                  the link is already active.
                 </p>
               </div>
+
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-text-tertiary">
                   Share URL
                 </label>
                 <div className="flex items-center gap-2">
                   <Input
-                    value={shareUrl}
+                    value={result.share_url}
                     readOnly
                     onClick={(e) => (e.target as HTMLInputElement).select()}
                     className="text-xs font-mono"
@@ -162,9 +194,30 @@ export function SendToClientDialog({
                       </>
                     )}
                   </Button>
+                  <a
+                    href={result.share_url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="inline-flex items-center justify-center h-9 w-9 rounded-md border border-border bg-bg-tertiary text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors"
+                    title="Open in a new tab (preview)"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
                 </div>
               </div>
-              <div className="flex justify-end">
+
+              <div className="flex justify-between items-center pt-2">
+                <button
+                  className="text-xs text-text-tertiary hover:text-text-secondary underline underline-offset-2"
+                  onClick={() => {
+                    // Send to another email — reset to form state, keep modal open.
+                    setResult(null)
+                    setRecipientEmail('')
+                    setError(null)
+                  }}
+                >
+                  Send to another email
+                </button>
                 <Button onClick={() => onOpenChange(false)}>Done</Button>
               </div>
             </div>
@@ -238,7 +291,14 @@ export function SendToClientDialog({
                 />
               </Field>
 
-              {error && <p className="text-xs text-status-error">{error}</p>}
+              {error && (
+                <div className="rounded-md border border-status-error/40 bg-status-error/10 px-3 py-2">
+                  <p className="text-xs text-status-error font-medium">
+                    Send failed
+                  </p>
+                  <p className="text-[11px] text-status-error/80 mt-0.5">{error}</p>
+                </div>
+              )}
 
               <div className="flex justify-end gap-2 pt-2">
                 <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={submitting}>

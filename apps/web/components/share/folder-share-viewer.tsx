@@ -1038,8 +1038,8 @@ export function FolderShareViewer({
 
   // Set page title
   React.useEffect(() => {
-    document.title = title ? `${title} – FreeFrame` : 'FreeFrame'
-    return () => { document.title = 'FreeFrame' }
+    document.title = title ? `${title} – FreeFrame` : 'KPI Creatives'
+    return () => { document.title = 'KPI Creatives' }
   }, [title])
   const [selectedAsset, setSelectedAsset] = React.useState<FolderShareAssetItem | null>(null)
 
@@ -1303,7 +1303,7 @@ export function FolderShareViewer({
               className="flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-bold text-text-primary shrink-0"
               style={{ backgroundColor: accentColor }}
             >
-              {(branding?.custom_title ?? folderName ?? 'FF').substring(0, 2).toUpperCase()}
+              {(branding?.custom_title ?? folderName ?? 'KC').substring(0, 2).toUpperCase()}
             </div>
           )}
 

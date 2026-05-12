@@ -399,24 +399,31 @@ function ShareTopBar({
           </button>
         )}
 
-        {/* Avatar placeholder */}
-        <div
-          className="flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold text-white shrink-0"
-          style={{ backgroundColor: primaryColor }}
-        >
-          {branding?.logo_s3_key ? (
+        {/* Logo — share-link top bar.
+           Branding override (logo_s3_key set on the project) wins; otherwise
+           we show the KPI Creatives mark. The wordmark already sits in the
+           breadcrumb to the right of this element. */}
+        {branding?.logo_s3_key ? (
+          <div
+            className="flex h-6 w-6 items-center justify-center rounded-full overflow-hidden shrink-0"
+            style={{ backgroundColor: primaryColor }}
+          >
             <img
               src={`${API_URL}/share/branding/logo`}
               alt=""
-              className="h-full w-full rounded-full object-cover"
+              className="h-full w-full object-cover"
               onError={(e) => {
                 ;(e.target as HTMLImageElement).style.display = 'none'
               }}
             />
-          ) : (
-            'FF'
-          )}
-        </div>
+          </div>
+        ) : (
+          <img
+            src="/kpi-logo.svg"
+            alt="KPI Creatives"
+            className="h-5 w-auto shrink-0"
+          />
+        )}
 
         {/* Breadcrumb */}
         <nav className="flex items-center gap-1 text-[13px] min-w-0">
@@ -783,7 +790,7 @@ function ShareViewer({
       .finally(() => setStreamLoading(false))
   }, [token, asset.asset_type, asset.stream_url, asset.id])
 
-  const displayName = shareName || branding?.custom_title || 'FreeFrame'
+  const displayName = shareName || branding?.custom_title || 'KPI Creatives'
 
   return (
     <div className="absolute inset-0 flex flex-col bg-zinc-950 text-white overflow-hidden">

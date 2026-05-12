@@ -130,3 +130,37 @@ def test_update_role_rejects_unknown_role(client, mock_db, test_user, auth_heade
     )
     assert resp.status_code == 400
     assert "wizard" in resp.text.lower()
+
+
+# ── Smart per-project default tests ──────────────────────────────────────────
+
+def test_default_project_role_for_admin():
+    from apps.api.routers.projects import _default_project_role_for
+    from apps.api.models.project import ProjectRole
+    u = MagicMock()
+    u.role = UserRole.admin
+    assert _default_project_role_for(u) == ProjectRole.owner
+
+
+def test_default_project_role_for_producer():
+    from apps.api.routers.projects import _default_project_role_for
+    from apps.api.models.project import ProjectRole
+    u = MagicMock()
+    u.role = UserRole.producer
+    assert _default_project_role_for(u) == ProjectRole.owner
+
+
+def test_default_project_role_for_editor():
+    from apps.api.routers.projects import _default_project_role_for
+    from apps.api.models.project import ProjectRole
+    u = MagicMock()
+    u.role = UserRole.editor
+    assert _default_project_role_for(u) == ProjectRole.editor
+
+
+def test_default_project_role_falls_back_to_viewer_for_unknown_role():
+    from apps.api.routers.projects import _default_project_role_for
+    from apps.api.models.project import ProjectRole
+    u = MagicMock()
+    u.role = None  # malformed user
+    assert _default_project_role_for(u) == ProjectRole.viewer

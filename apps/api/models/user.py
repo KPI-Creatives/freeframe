@@ -37,6 +37,24 @@ class UserRole(str, PyEnum):
     External clients are NOT a UserRole — they live in the ``guest_users``
     table and act via share-links (where the ``ShareLink.permission`` field
     gates view / comment / approve).
+
+    Mapping to per-project ProjectRole on add-member:
+      ``admin``    → ``ProjectRole.owner``   (Full Access)
+      ``producer`` → ``ProjectRole.owner``   (Full Access)
+      ``editor``   → ``ProjectRole.editor``  (Edit & Share)
+    Applied by ``apps/api/routers/projects.py::add_project_member`` when the
+    request body omits an explicit ``role``. The producer / admin can always
+    override via the dropdown (View Only, Comment Only, Edit & Share, Full
+    Access — see ProjectRole).
+
+    Two-layer permission model:
+      * ``UserRole`` is the GLOBAL gate — "what kind of user are you in the
+        workspace" (can you create projects? send to client? manage members?).
+      * ``ProjectRole`` is the PER-PROJECT gate — "what can you do INSIDE this
+        specific project" (upload, comment, view only).
+    Endpoints requiring sensitive actions check BOTH (defence in depth).
+
+    See also: kpi/frame#2 — eventually unify ProjectRole into UserRole.
     """
     editor = "editor"
     producer = "producer"

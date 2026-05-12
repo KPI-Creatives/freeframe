@@ -582,7 +582,7 @@ def send_asset_to_client(
     from ..config import settings
     from datetime import timedelta
     import secrets, bcrypt
-    from ..services.encryption import encrypt_password
+    from ..services.crypto_service import encrypt_password
 
     payload = body
 

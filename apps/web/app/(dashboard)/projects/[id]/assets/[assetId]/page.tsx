@@ -14,6 +14,7 @@ import { CommentPanel } from '@/components/review/comment-panel'
 import { CommentInput } from '@/components/review/comment-input'
 // ApprovalBar removed for now
 import { VersionSwitcher } from '@/components/review/version-switcher'
+import { VersionCompare } from '@/components/review/version-compare'
 import { ShareDialog } from '@/components/review/share-dialog'
 import { useReviewStore } from '@/stores/review-store'
 import { useAuthStore } from '@/stores/auth-store'
@@ -36,6 +37,7 @@ import {
   Send,
   PackageCheck,
   Eye,
+  GitCompareArrows,
 } from 'lucide-react'
 import Link from 'next/link'
 import { cn } from '@/lib/utils'
@@ -64,6 +66,7 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
   const [showMarkDelivered, setShowMarkDelivered] = useState(false)
   const [showHandoff, setShowHandoff] = useState(false)
   const [previewAsClient, setPreviewAsClient] = useState(false)
+  const [compareMode, setCompareMode] = useState(false)
   const versionFileInputRef = useRef<HTMLInputElement>(null)
   const setExtraCrumbs = useBreadcrumbStore((s) => s.setExtraCrumbs)
   const setLabel = useBreadcrumbStore((s) => s.setLabel)
@@ -423,6 +426,16 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
             }}
           />
           <VersionSwitcher versions={visibleVersions} />
+          {visibleVersions.length > 1 && (
+            <button
+              onClick={() => setCompareMode(true)}
+              className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-8 text-xs font-medium border border-border text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
+              title="Compare two versions side-by-side"
+            >
+              <GitCompareArrows className="h-3.5 w-3.5" />
+              Compare
+            </button>
+          )}
           <button
             onClick={() => versionFileInputRef.current?.click()}
             className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-8 text-xs font-medium border border-border text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
@@ -500,6 +513,16 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
               import('swr').then(({ mutate }) => mutate(`/assets/${asset.id}`))
             }}
           />
+
+          {/* Compare Mode — full-bleed overlay over the main content area. */}
+          {compareMode && currentVersion && (
+            <VersionCompare
+              assetId={asset.id}
+              versions={visibleVersions}
+              primaryVersionId={currentVersion.id}
+              onClose={() => setCompareMode(false)}
+            />
+          )}
 
           <button
             onClick={() => setSidebarOpen((p) => !p)}

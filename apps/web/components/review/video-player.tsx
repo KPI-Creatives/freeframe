@@ -134,7 +134,7 @@ export function VideoPlayer({
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [loop, setLoop] = useState(false);
 
-  const { isDrawingMode, timeFormat, setTimeFormat, setPlayheadTime } =
+  const { isDrawingMode, timeFormat, setTimeFormat, setPlayheadTime, currentVersion } =
     useReviewStore();
   const { registerPauseHandler } = useReview();
   const [timeFormatOpen, setTimeFormatOpen] = useState(false);
@@ -167,8 +167,12 @@ export function VideoPlayer({
     }
   }
 
-  // Load the stream URL — reset immediately on asset change so the old video
-  // doesn't keep playing while the new URL is being fetched.
+  // Load the stream URL — reset immediately on asset OR version change so
+  // the old video doesn't keep playing while the new URL is being fetched.
+  // Including currentVersion?.id in the deps array is what fixes the
+  // long-standing 'dropdown switch but video doesn't change' bug — the
+  // /assets/:id/stream endpoint takes version_id as an optional query
+  // param and falls back to the latest ready version when omitted.
   useEffect(() => {
     setStreamUrl(null);
     if (initialStreamUrl) {
@@ -178,8 +182,11 @@ export function VideoPlayer({
       setStreamUrl(resolved);
       return;
     }
+    const path = currentVersion?.id
+      ? `/assets/${assetId}/stream?version_id=${currentVersion.id}`
+      : `/assets/${assetId}/stream`;
     api
-      .get<StreamUrlResponse>(`/assets/${assetId}/stream`)
+      .get<StreamUrlResponse>(path)
       .then((data) => {
         // HLS proxy returns relative paths — prepend API URL
         const url = data.url.startsWith("/")
@@ -190,7 +197,7 @@ export function VideoPlayer({
       .catch(() => {
         /* stream URL errors handled by player error state */
       });
-  }, [assetId, initialStreamUrl]);
+  }, [assetId, initialStreamUrl, currentVersion?.id]);
 
   const player = useVideoPlayer(streamUrl);
 
@@ -328,6 +335,16 @@ export function VideoPlayer({
         {error && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/60">
             <p className="text-red-400 text-sm">{error}</p>
+          </div>
+        )}
+
+        {/* Version badge — small pill in the top-left of the video frame.
+           Renders only when there's a current version (always the case in
+           authenticated mode; in share mode useReview builds a pseudo
+           version too, so this still shows). */}
+        {currentVersion && (
+          <div className="absolute top-3 left-3 z-10 inline-flex items-center gap-1 rounded-md bg-black/60 backdrop-blur px-2 py-1 text-[11px] font-medium text-white pointer-events-none">
+            v{currentVersion.version_number}
           </div>
         )}
 

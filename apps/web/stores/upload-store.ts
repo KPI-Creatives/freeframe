@@ -2,6 +2,7 @@ import { create, type StateCreator } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { api } from '@/lib/api'
 import type { AssetResponse } from '@/types'
+import { useTimeTrackingStore } from '@/stores/time-tracking-store'
 
 const CHUNK_SIZE = 10 * 1024 * 1024 // 10 MB
 const HISTORY_PAGE_SIZE = 20
@@ -54,6 +55,36 @@ interface VersionInitiateResponse {
 
 // AbortControllers for cancellation
 const abortControllers: Record<string, AbortController> = {}
+
+// ── Time-tracking modal trigger ────────────────────────────────────────────
+// After an upload's /upload/complete returns, fetch the asset and — if it
+// opts into time tracking — push a prompt onto the time-tracking queue. The
+// host modal mounted at page level picks it up.
+//
+// Fire-and-forget: we don't block the upload pipeline on the GET, and we
+// silently no-op on failure (worst case, editor doesn't see the modal for
+// this upload; their total stays accurate via Fields-tab edit).
+async function _maybePromptTimeTracking(assetId: string, versionId: string) {
+  try {
+    const asset = await api.get<AssetResponse>(`/assets/${assetId}`)
+    if (!asset.track_time) return
+    const versionNumber = asset.latest_version?.version_number ?? 1
+    // total_minutes_spent on the asset already includes this version's
+    // (currently null) entry — so it equals the sum of OTHER versions.
+    // That's exactly what the modal wants for "Already on this asset".
+    useTimeTrackingStore.getState().enqueue({
+      assetId,
+      versionId,
+      assetName: asset.name,
+      versionNumber,
+      priorTotalMinutes: asset.total_minutes_spent ?? 0,
+      initialMinutes: null,
+    })
+  } catch {
+    // Silent: not blocking the upload flow.
+  }
+}
+
 
 interface UploadStore {
   files: UploadFile[]
@@ -357,6 +388,8 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
           version_id,
           parts,
         })
+        // Fire-and-forget time-tracking prompt — see helper above.
+        void _maybePromptTimeTracking(asset_id, version_id)
 
         // Upload done — backend now processes (transcode/convert).
         // For non-processable types (or if SSE isn't wired), mark complete directly.
@@ -471,6 +504,8 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
         }
 
         await api.post('/upload/complete', { s3_key, upload_id, asset_id: assetId, version_id, parts })
+        // Fire-and-forget time-tracking prompt — see helper above.
+        void _maybePromptTimeTracking(assetId, version_id)
         const isMedia = file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type.startsWith('image/') || DOCUMENT_EXTENSIONS.some((e) => file.name.toLowerCase().endsWith(e))
         updateFile(id, {
           progress: 100,

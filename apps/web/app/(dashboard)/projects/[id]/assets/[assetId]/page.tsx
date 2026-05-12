@@ -14,6 +14,8 @@ import { CommentPanel } from '@/components/review/comment-panel'
 import { CommentInput } from '@/components/review/comment-input'
 // ApprovalBar removed for now
 import { VersionSwitcher } from '@/components/review/version-switcher'
+import { TimeTrackingPromptHost, formatMinutes } from '@/components/projects/time-tracking-modal'
+import { Clock } from 'lucide-react'
 import { VersionCompare } from '@/components/review/version-compare'
 import { ShareDialog } from '@/components/review/share-dialog'
 import { useReviewStore } from '@/stores/review-store'
@@ -360,6 +362,8 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
 
   return (
     <div className="absolute inset-0 flex flex-col overflow-hidden">
+      {/* Mount once — reads from the time-tracking store queue. */}
+      <TimeTrackingPromptHost />
       {/* ─── Top bar (Frame.io style) ──────────────────────────────────── */}
       <div className="flex items-center justify-between border-b border-border px-3 h-12 bg-bg-secondary shrink-0">
         {/* Left: back + breadcrumb */}
@@ -425,6 +429,15 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
               setShowHandoff(true)
             }}
           />
+          {asset.track_time && asset.total_minutes_spent > 0 && (
+            <span
+              className="inline-flex items-center gap-1 rounded-md px-2 h-8 text-xs font-medium border border-border text-text-secondary"
+              title="Total editing time logged across all versions"
+            >
+              <Clock className="h-3.5 w-3.5" />
+              <span className="tabular-nums">{formatMinutes(asset.total_minutes_spent)}</span>
+            </span>
+          )}
           <VersionSwitcher versions={visibleVersions} />
           {visibleVersions.length > 1 && (
             <button

@@ -150,6 +150,10 @@ export interface Asset {
   delivered_version_id: string | null;
   block_reason: string | null;
   custom_fields: VideoCustomFields | null;
+  /** Whether this asset prompts the time-tracking modal on new uploads. */
+  track_time: boolean;
+  /** Sum of `minutes_spent` across all live versions (denormalised). */
+  total_minutes_spent: number;
   due_date: string | null;
   keywords: string[];
   created_by: string;
@@ -163,6 +167,8 @@ export interface AssetVersion {
   asset_id: string;
   version_number: number;
   processing_status: AssetVersionStatus;
+  /** Editor-reported time spent on this version, in minutes; null = skipped/unset. */
+  minutes_spent: number | null;
   created_by: string;
   created_at: string;
   deleted_at: string | null;
@@ -483,11 +489,16 @@ export interface WatermarkSettings {
 
 // ─── Folders ──────────────────────────────────────────────────────────────────
 
+export type TimeTrackingDefault = 'on' | 'off' | 'inherit'
+
 export interface Folder {
   id: string
   project_id: string
   parent_id: string | null
   name: string
+  time_tracking_default: TimeTrackingDefault
+  /** Effective boolean after walking the parent chain — computed server-side. */
+  time_tracking_resolved: boolean
   created_by: string
   created_at: string
   updated_at: string
@@ -498,6 +509,7 @@ export interface FolderTreeNode {
   id: string
   name: string
   parent_id: string | null
+  time_tracking_default: TimeTrackingDefault
   item_count: number
   children: FolderTreeNode[]
 }

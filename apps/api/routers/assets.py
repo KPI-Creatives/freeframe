@@ -180,6 +180,18 @@ def update_asset(
 
     updates = body.model_dump(exclude_unset=True)
 
+    # Validate video-specific custom fields against the typed Pydantic
+    # schema. We do this here (not on the schema itself) so the rule can
+    # branch on asset_type — a future document-type asset may want a
+    # different validator.
+    if "custom_fields" in updates and updates["custom_fields"] is not None:
+        if asset.asset_type == AssetType.video:
+            from ..schemas.video_fields import validate_custom_fields_dict
+            try:
+                updates["custom_fields"] = validate_custom_fields_dict(updates["custom_fields"])
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid custom_fields: {e}")
+
     # Phase transition guards. Phase is producer-managed; advancing it via this
     # generic PATCH is allowed (Send-to-client and Mark-delivered also funnel
     # through here for the column write, but they're more typically called via

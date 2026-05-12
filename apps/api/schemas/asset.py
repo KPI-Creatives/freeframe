@@ -70,6 +70,13 @@ class AssetUpdate(BaseModel):
     priority: Optional[AssetPriority] = None
     phase: Optional[AssetPhase] = None
     block_reason: Optional[str] = None
+    # JSONB blob holding video-specific custom fields (format/goal/source/
+    # style/talent). The shape is validated against
+    # apps/api/schemas/video_fields.py:VideoCustomFields when the asset is
+    # asset_type == 'video'. Other asset types may carry a free-form dict;
+    # validation lives at the router level rather than the schema level so
+    # we can branch on asset_type.
+    custom_fields: Optional[dict] = None
     due_date: Optional[datetime] = None
     keywords: Optional[list] = None
 

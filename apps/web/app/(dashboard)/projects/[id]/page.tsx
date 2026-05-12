@@ -402,6 +402,7 @@ export default function ProjectDetailPage() {
           {/* Project folder tree */}
           <FolderTree
             tree={tree}
+            projectId={projectId}
             projectName={project?.name || "Project"}
             currentFolderId={currentFolderId}
             showTrash={showTrash}

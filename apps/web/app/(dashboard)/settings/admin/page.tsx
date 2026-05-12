@@ -12,7 +12,7 @@ import { Avatar } from "@/components/shared/avatar";
 import { EmptyState } from "@/components/shared/empty-state";
 import { useAuthStore } from "@/stores/auth-store";
 import { useRouter } from "next/navigation";
-import type { User, UserStatus } from "@/types";
+import type { User, UserRole, UserStatus } from "@/types";
 
 function BulkInviteDialog() {
   const [open, setOpen] = React.useState(false);
@@ -210,19 +210,25 @@ export default function AdminPage() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const handleToggleAdmin = async (
-    userId: string,
-    isCurrentlyAdmin: boolean,
-  ) => {
+  const handleSetRole = async (userId: string, newRole: UserRole) => {
     try {
-      await api.patch(`/admin/users/${userId}/role`, {
-        is_admin: !isCurrentlyAdmin,
-      });
+      await api.patch(`/admin/users/${userId}/role`, { role: newRole });
       mutate("/admin/users");
     } catch (err: unknown) {
       const message =
         err instanceof Error ? err.message : "Failed to update user role";
       alert(message);
+    }
+  };
+
+  const roleBadgeClass = (role: UserRole) => {
+    switch (role) {
+      case "admin":
+        return "bg-accent/15 text-accent";
+      case "producer":
+        return "bg-amber-500/15 text-amber-300";
+      default:
+        return "bg-bg-tertiary text-text-secondary";
     }
   };
 
@@ -313,14 +319,15 @@ export default function AdminPage() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      {u.is_superadmin ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">
-                          <Shield className="h-3 w-3" />
-                          Admin
-                        </span>
-                      ) : (
-                        <span className="text-xs text-text-tertiary">User</span>
-                      )}
+                      <span
+                        className={cn(
+                          "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium capitalize",
+                          roleBadgeClass(u.role),
+                        )}
+                      >
+                        {u.role === "admin" && <Shield className="h-3 w-3" />}
+                        {u.role}
+                      </span>
                     </td>
                     <td className="px-4 py-3">{userStatusBadge(u.status)}</td>
                     <td className="px-4 py-3 text-xs text-text-tertiary">
@@ -351,15 +358,18 @@ export default function AdminPage() {
                           </Button>
                         )}
                         {u.id !== user?.id && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() =>
-                              handleToggleAdmin(u.id, u.is_superadmin)
+                          <select
+                            value={u.role}
+                            onChange={(e) =>
+                              handleSetRole(u.id, e.target.value as UserRole)
                             }
+                            className="rounded-md border border-border bg-bg-secondary px-2 py-1 text-xs text-text-primary focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                            aria-label={`Role for ${u.name}`}
                           >
-                            {u.is_superadmin ? "Remove Admin" : "Make Admin"}
-                          </Button>
+                            <option value="editor">Editor</option>
+                            <option value="producer">Producer</option>
+                            <option value="admin">Admin</option>
+                          </select>
                         )}
                         {u.id !== user?.id && u.status === "active" ? (
                           <Button

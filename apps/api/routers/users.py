@@ -5,7 +5,7 @@ import secrets
 from datetime import datetime, timezone, timedelta
 from ..database import get_db
 from ..schemas.auth import UserResponse, InviteRequest, UpdateProfileRequest
-from ..models.user import User, UserStatus
+from ..models.user import User, UserRole, UserStatus
 from ..middleware.auth import get_current_user
 from ..services.auth_service import hash_password, get_user_by_email
 from ..tasks.email_tasks import send_invite_email
@@ -60,12 +60,23 @@ def invite_user(body: InviteRequest, db: Session = Depends(get_db), current_user
     invite_token = secrets.token_urlsafe(48)
     invite_expires = datetime.now(timezone.utc) + timedelta(days=7)
     
+    # Validate role from invite body.
+    try:
+        invite_role = UserRole(body.role)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role '{body.role}' — expected one of: editor, producer, admin",
+        )
+
     user = User(
         email=body.email,
         name=body.name,
         status=UserStatus.pending_invite,
         invite_token=invite_token,
         invite_token_expires_at=invite_expires,
+        role=invite_role,
+        is_superadmin=(invite_role == UserRole.admin),
     )
     db.add(user)
     db.commit()

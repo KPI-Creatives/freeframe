@@ -28,6 +28,7 @@ class UserResponse(BaseModel):
     status: UserStatus
     email_verified: bool = False
     is_superadmin: bool = False
+    role: str = "editor"        # editor | producer | admin (mirrors users.UserRole)
     invite_token: str | None = None
     preferences: dict = {}
 
@@ -36,6 +37,7 @@ class UserResponse(BaseModel):
 class InviteRequest(BaseModel):
     email: EmailStr
     name: str
+    role: str = "editor"          # editor | producer | admin (default editor)
 
 # Magic code flow
 class SendMagicCodeRequest(BaseModel):
@@ -67,7 +69,11 @@ class UpdateProfileRequest(BaseModel):
     avatar_url: str | None = None
 
 class UpdateUserRoleRequest(BaseModel):
-    is_admin: bool
+    # Either field is accepted; ``role`` is the new canonical form, ``is_admin``
+    # remains for old clients (true ⇒ admin, false ⇒ editor — a coarse mapping
+    # that does NOT touch a user who is already a producer).
+    role: str | None = None         # "editor" | "producer" | "admin"
+    is_admin: bool | None = None
 
 class DeactivateUserRequest(BaseModel):
     user_id: uuid.UUID

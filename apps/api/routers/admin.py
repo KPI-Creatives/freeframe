@@ -6,7 +6,7 @@ import uuid
 
 from ..database import get_db
 from ..middleware.auth import get_current_user
-from ..models.user import User, UserStatus
+from ..models.user import User, UserStatus, UserRole
 from ..schemas.auth import UserResponse, UpdateUserRoleRequest
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -94,18 +94,48 @@ def update_user_role(
             detail="Only admins can change user roles"
         )
 
-    # Prevent admin from removing their own admin role
-    if user_id == current_user.id and not body.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You cannot remove your own admin role"
-        )
-
     user = db.query(User).filter(User.id == user_id, User.deleted_at.is_(None)).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user.is_superadmin = body.is_admin
+    # Determine the target role. ``role`` field is canonical; ``is_admin``
+    # remains supported for old clients (true=admin, false=editor) but the
+    # presence of an explicit ``role`` always wins.
+    target_role: UserRole | None = None
+    if body.role is not None:
+        try:
+            target_role = UserRole(body.role)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid role '{body.role}' — expected one of: editor, producer, admin",
+            )
+    elif body.is_admin is not None:
+        # Old client. Only flip between admin and editor; do NOT demote a
+        # producer to editor as a side effect of "Remove Admin".
+        if body.is_admin:
+            target_role = UserRole.admin
+        elif user.role == UserRole.admin:
+            target_role = UserRole.editor
+        else:
+            target_role = user.role  # no-op for producer/editor
+
+    if target_role is None:
+        raise HTTPException(status_code=400, detail="Either 'role' or 'is_admin' must be provided")
+
+    # Protect against the last admin demoting themselves.
+    if (
+        user_id == current_user.id
+        and target_role != UserRole.admin
+        and user.role == UserRole.admin
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot remove your own admin role",
+        )
+
+    user.role = target_role
+    user.is_superadmin = (target_role == UserRole.admin)
     db.commit()
     db.refresh(user)
     return user

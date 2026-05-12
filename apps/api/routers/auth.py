@@ -22,7 +22,7 @@ from ..services.redis_service import (
 )
 from ..tasks.email_tasks import send_magic_code_email, send_invite_email
 from ..tasks.celery_app import send_task_safe
-from ..models.user import User, UserStatus
+from ..models.user import User, UserStatus, UserRole
 from ..middleware.auth import get_current_user
 from ..middleware.rate_limit import rate_limit
 
@@ -57,6 +57,7 @@ def send_magic_code(body: SendMagicCodeRequest, db: Session = Depends(get_db)):
             status=UserStatus.pending_verification,
             email_verified=False,
             is_superadmin=is_first_user,  # First user becomes super admin
+            role=UserRole.admin if is_first_user else UserRole.editor,
         )
         db.add(user)
         db.commit()

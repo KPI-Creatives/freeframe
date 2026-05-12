@@ -16,6 +16,51 @@ class UserStatus(str, PyEnum):
     pending_invite = "pending_invite"
     pending_verification = "pending_verification"
 
+
+class UserRole(str, PyEnum):
+    """Organization-level role for an internal KPI user account.
+
+    Three tiers, monotonic in privileges:
+
+      * ``editor``   — uploads versions to assets where they are assignee,
+                       comments, logs time, internal-approves their own work.
+                       Default for any new invite.
+      * ``producer`` — everything editor plus: creates assets in projects
+                       they are a member of, manages assignee/reviewer/phase/
+                       priority, ``Send to client``, ``Mark delivered``,
+                       manages project membership.
+      * ``admin``    — everything producer plus a global bypass: sees every
+                       project without explicit membership, manages org-level
+                       users (invite / change role / deactivate), branding,
+                       billing.
+
+    External clients are NOT a UserRole — they live in the ``guest_users``
+    table and act via share-links (where the ``ShareLink.permission`` field
+    gates view / comment / approve).
+
+    Mapping to per-project ProjectRole on add-member:
+      ``admin``    → ``ProjectRole.owner``   (Full Access)
+      ``producer`` → ``ProjectRole.owner``   (Full Access)
+      ``editor``   → ``ProjectRole.editor``  (Edit & Share)
+    Applied by ``apps/api/routers/projects.py::add_project_member`` when the
+    request body omits an explicit ``role``. The producer / admin can always
+    override via the dropdown (View Only, Comment Only, Edit & Share, Full
+    Access — see ProjectRole).
+
+    Two-layer permission model:
+      * ``UserRole`` is the GLOBAL gate — "what kind of user are you in the
+        workspace" (can you create projects? send to client? manage members?).
+      * ``ProjectRole`` is the PER-PROJECT gate — "what can you do INSIDE this
+        specific project" (upload, comment, view only).
+    Endpoints requiring sensitive actions check BOTH (defence in depth).
+
+    See also: kpi/frame#2 — eventually unify ProjectRole into UserRole.
+    """
+    editor = "editor"
+    producer = "producer"
+    admin = "admin"
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -25,6 +70,12 @@ class User(Base):
     password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.active)
     is_superadmin: Mapped[bool] = mapped_column(default=False)
+    # role mirrors is_superadmin for admins (kept in lockstep by the
+    # ``users.update_user_role`` endpoint) and lets us express editor /
+    # producer distinctions that ``is_superadmin`` cannot. New code should
+    # read ``role``; ``is_superadmin`` stays for backwards compat with the
+    # pre-N1.A code paths (admin router, setup wizard, signup).
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False, default=UserRole.editor)
     email_verified: Mapped[bool] = mapped_column(default=False)
     invite_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     invite_token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

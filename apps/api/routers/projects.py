@@ -7,8 +7,30 @@ from ..database import get_db
 from ..middleware.auth import get_current_user
 from ..models.user import User
 from ..models.project import Project, ProjectMember, ProjectRole
+from ..models.user import UserRole
 from ..models.asset import Asset, AssetVersion, MediaFile
 from ..schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse, ProjectMemberResponse, AddProjectMemberRequest, UpdateProjectMemberRequest
+
+
+# Maps a user's GLOBAL role to the sensible default PER-PROJECT role when
+# they are added to a project without an explicit role override. See
+# ``UserRole`` docstring for the rationale. Override path: the producer/
+# admin doing the invite picks a different ProjectRole in the modal
+# ("Add to <Project>" dialog — Full Access / Edit & Share / Comment Only /
+# View Only).
+_DEFAULT_PROJECT_ROLE_BY_USER_ROLE = {
+    UserRole.admin: ProjectRole.owner,        # Full Access
+    UserRole.producer: ProjectRole.owner,     # Full Access
+    UserRole.editor: ProjectRole.editor,      # Edit & Share
+}
+
+
+def _default_project_role_for(user: User) -> ProjectRole:
+    """Return the sensible ProjectRole for ``user`` when added without an
+    explicit override. Falls back to viewer for unknown roles (defensive).
+    """
+    return _DEFAULT_PROJECT_ROLE_BY_USER_ROLE.get(user.role, ProjectRole.viewer)
+
 from ..tasks.email_tasks import send_project_added_email
 from ..tasks.celery_app import send_task_safe
 from ..services.s3_service import put_object, generate_presigned_get_url, delete_object
@@ -191,17 +213,28 @@ def add_project_member(project_id: uuid.UUID, body: AddProjectMemberRequest, db:
     _get_project(db, project_id)
     _require_project_owner(db, project_id, current_user)
     existing = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == body.user_id).first()
+
+    # Resolve role. If the inviter didn't pick one explicitly, default based
+    # on the invitee's global role (admin/producer → owner, editor → editor).
+    if body.role is not None:
+        effective_role = body.role
+    else:
+        invited_user = db.query(User).filter(User.id == body.user_id, User.deleted_at.is_(None)).first()
+        if not invited_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        effective_role = _default_project_role_for(invited_user)
+
     if existing:
         if existing.deleted_at is None:
             raise HTTPException(status_code=400, detail="User already a project member")
         # Reactivate soft-deleted membership
         existing.deleted_at = None
-        existing.role = body.role
+        existing.role = effective_role
         db.commit()
         db.refresh(existing)
         member = existing
     else:
-        member = ProjectMember(project_id=project_id, user_id=body.user_id, role=body.role, invited_by=current_user.id)
+        member = ProjectMember(project_id=project_id, user_id=body.user_id, role=effective_role, invited_by=current_user.id)
         db.add(member)
         db.commit()
         db.refresh(member)
@@ -216,7 +249,7 @@ def add_project_member(project_id: uuid.UUID, body: AddProjectMemberRequest, db:
             adder_name=current_user.name,
             project_name=project.name,
             project_link=project_link,
-            role=body.role.value if body.role else None,
+            role=effective_role.value,
         )
 
     return member

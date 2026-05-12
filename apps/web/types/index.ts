@@ -41,6 +41,12 @@ export type ViewerLayout = "grid" | "reel";
 
 export type ApprovalStatus = "approved" | "rejected" | "pending";
 
+// Organization-level role for an internal KPI user account.
+// Monotonic: editor < producer < admin. See apps/api/models/user.py:UserRole.
+// External clients are NOT a UserRole — they live in guest_users and access
+// via ShareLink.permission (view/comment/approve), not via a user account.
+export type UserRole = "editor" | "producer" | "admin";
+
 // ─── Core Entities ────────────────────────────────────────────────────────────
 
 export interface User {
@@ -49,7 +55,8 @@ export interface User {
   name: string;
   avatar_url: string | null;
   status: UserStatus;
-  is_superadmin: boolean;
+  is_superadmin: boolean;   // legacy mirror of (role === 'admin'); kept for backwards compat
+  role: UserRole;           // canonical org-level role
   email_verified: boolean;
   invite_token?: string | null;
   preferences: Record<string, unknown>;

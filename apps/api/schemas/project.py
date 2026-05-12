@@ -37,7 +37,10 @@ class ProjectMemberResponse(BaseModel):
 
 class AddProjectMemberRequest(BaseModel):
     user_id: uuid.UUID
-    role: ProjectRole = ProjectRole.viewer
+    # When omitted the router picks a smart default based on the invited
+    # user's global ``UserRole`` (admin/producer → owner, editor → editor).
+    # Producers/admins can still override explicitly via the UI.
+    role: ProjectRole | None = None
 
 class UpdateProjectMemberRequest(BaseModel):
     role: ProjectRole

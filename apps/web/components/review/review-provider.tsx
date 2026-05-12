@@ -131,7 +131,7 @@ export function ReviewProvider({
                 files: [],
               }
             : null,
-        } as AssetResponse;
+        } as unknown as AssetResponse;
       } else {
         // Normal mode: authenticated API
         data = await api.get<AssetResponse>(`/assets/${assetId}`);

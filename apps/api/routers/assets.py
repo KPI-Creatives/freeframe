@@ -12,7 +12,7 @@ from ..models.asset import Asset, AssetVersion, MediaFile, AssetType, FileType, 
 from ..models.project import Project, ProjectMember, ProjectRole
 from ..models.share import AssetShare
 from ..models.activity import Mention, Notification, NotificationType
-from ..schemas.asset import AssetResponse, AssetVersionResponse, AssetUpdate, StreamUrlResponse, MediaFileResponse, SendToClientRequest, MarkDeliveredRequest
+from ..schemas.asset import AssetResponse, AssetVersionResponse, AssetUpdate, StreamUrlResponse, MediaFileResponse, SendToClientRequest, MarkDeliveredRequest, LogTimeRequest, LogTimeResponse
 from ..schemas.notification import AssignmentUpdate
 from ..services.permissions import require_project_role, require_asset_access, can_access_asset, is_public_project, get_project_member
 from ..services.s3_service import generate_presigned_get_url, build_download_filename
@@ -782,3 +782,154 @@ def mark_asset_delivered(
         "delivered_version_id": str(asset.delivered_version_id) if asset.delivered_version_id else None,
         "share_links_downgraded": downgraded,
     }
+
+
+# ── Time tracking — POST /assets/:id/versions/:version_id/log-time ─────────────
+
+# Editor's own edits can be modified within this window after the version was
+# created (counted from `AssetVersion.created_at`). Producer+ has no such
+# limit; they can correct or back-fill any version at any time.
+_TIME_EDIT_WINDOW_DAYS = 7
+
+
+def _can_log_time(
+    version: AssetVersion,
+    current_user: User,
+) -> tuple[bool, str | None]:
+    """Permission check for logging time on a version.
+
+    Returns (allowed, reason_if_denied). The two-tier rule:
+      * Editor (UserRole.editor, or the version owner) — only their own
+        versions, only within ``_TIME_EDIT_WINDOW_DAYS`` of the upload.
+      * Producer+ (UserRole.producer | UserRole.admin) — no constraint.
+    """
+    from ..models.user import UserRole
+    from ..services.permissions_role import role_at_least
+
+    # Producers and admins bypass both the ownership and the window check.
+    if role_at_least(current_user, UserRole.producer):
+        return True, None
+
+    # Editor (or anyone below producer) — must be the version owner.
+    if version.created_by != current_user.id:
+        return False, "Only the editor who uploaded this version (or a producer) can log time."
+
+    # And within the 7-day window. The window is for corrections to your
+    # own entries; if you forgot to log time on a week-old upload, a producer
+    # has to do it for you (so we keep an audit trail).
+    from datetime import timezone as _tz
+    now = datetime.now(_tz.utc)
+    created = version.created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=_tz.utc)
+    age_days = (now - created).total_seconds() / 86400
+    if age_days > _TIME_EDIT_WINDOW_DAYS:
+        return False, (
+            f"This version was uploaded {int(age_days)} days ago — outside the "
+            f"{_TIME_EDIT_WINDOW_DAYS}-day edit window for editors. Ask a producer to update it."
+        )
+
+    return True, None
+
+
+def _recompute_total_minutes(db: Session, asset_id: uuid.UUID) -> int:
+    """Sum non-NULL minutes_spent across all live versions of an asset."""
+    total = (
+        db.query(func.coalesce(func.sum(AssetVersion.minutes_spent), 0))
+        .filter(
+            AssetVersion.asset_id == asset_id,
+            AssetVersion.deleted_at.is_(None),
+        )
+        .scalar()
+    )
+    return int(total or 0)
+
+
+@router.post(
+    "/assets/{asset_id}/versions/{version_id}/log-time",
+    response_model=LogTimeResponse,
+)
+def log_time_for_version(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: LogTimeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Record (or clear) ``minutes_spent`` on a version and refresh the
+    asset's denormalised total in the same transaction.
+
+    The body's ``minutes_spent`` is one of:
+      * a non-negative int divisible by 5  →  set
+      * ``None``                            →  clear (treat as "skipped")
+
+    Permissions (per ``_can_log_time``):
+      * Editor / version-owner: own versions only, within 7 days of upload
+      * Producer / admin: anything, any time
+
+    A successful call returns both the new per-version value AND the
+    refreshed total, so the UI can swap in the chip without a separate
+    asset-refresh round-trip.
+    """
+
+    asset = (
+        db.query(Asset)
+        .filter(Asset.id == asset_id, Asset.deleted_at.is_(None))
+        .first()
+    )
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    # Project-level access — editor or above. The intra-project rule (own
+    # version, window) is checked separately in _can_log_time.
+    require_project_role(db, asset.project_id, current_user, ProjectRole.editor)
+
+    version = (
+        db.query(AssetVersion)
+        .filter(
+            AssetVersion.id == version_id,
+            AssetVersion.asset_id == asset_id,
+            AssetVersion.deleted_at.is_(None),
+        )
+        .first()
+    )
+    if version is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    if not asset.track_time:
+        # Refuse loudly rather than silently no-op. The UI should not be
+        # showing the modal if track_time is False; if we're here, something
+        # bypassed the gate.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Time tracking is disabled for this asset. Enable it via the "
+                "Fields tab (Track editing time) before logging time."
+            ),
+        )
+
+    allowed, reason = _can_log_time(version, current_user)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    # Apply the update — set or clear minutes_spent. The DB-level CHECK
+    # constraint enforces the multiple-of-5 rule even if a future schema
+    # change forgets the Pydantic validator.
+    version.minutes_spent = body.minutes_spent
+
+    # Recompute total from scratch — simpler than tracking delta and safer
+    # against concurrent writes (the SUM query takes a snapshot of all live
+    # versions including this one's just-updated value within the same txn).
+    db.flush()
+    new_total = _recompute_total_minutes(db, asset_id)
+    asset.total_minutes_spent = new_total
+
+    db.commit()
+
+    return LogTimeResponse(
+        asset_id=asset_id,
+        version_id=version_id,
+        version_minutes_spent=version.minutes_spent,
+        asset_total_minutes_spent=new_total,
+    )
+

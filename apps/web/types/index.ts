@@ -112,6 +112,25 @@ export interface ProjectMember {
 
 // ─── Asset & Media Entities ───────────────────────────────────────────────────
 
+// N1.B — producer-managed workflow primitives. See apps/api/models/asset.py.
+export type AssetPhase = "internal" | "client" | "delivered";
+export type AssetPriority = "P0" | "P1" | "P2";
+
+// Video-specific custom fields (asset_type === 'video'). Mirrored from
+// apps/api/schemas/video_fields.py.
+export type VideoFormat = "yt-long" | "shorts" | "reels" | "tiktok";
+export type VideoGoal = "awareness" | "lead-gen" | "education" | "proof";
+export type VideoSource = "original-shoot" | "client-supplied" | "stock-mix";
+export type VideoStyle = "talking-head" | "b-roll" | "motion-graphics";
+
+export interface VideoCustomFields {
+  format?: VideoFormat | null;
+  goal?: VideoGoal | null;
+  source?: VideoSource | null;
+  style?: VideoStyle[];
+  talent?: string | null;
+}
+
 export interface Asset {
   id: string;
   project_id: string;
@@ -121,7 +140,16 @@ export interface Asset {
   status: AssetStatus;
   rating: number | null;
   assignee_id: string | null;
+  reviewer_id: string | null;
   folder_id: string | null;
+  priority: AssetPriority | null;
+  phase: AssetPhase;
+  phase_client_at: string | null;
+  phase_delivered_at: string | null;
+  client_baseline_version_id: string | null;
+  delivered_version_id: string | null;
+  block_reason: string | null;
+  custom_fields: VideoCustomFields | null;
   due_date: string | null;
   keywords: string[];
   created_by: string;

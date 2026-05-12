@@ -31,6 +31,41 @@ class ProcessingStatus(str, PyEnum):
     ready = "ready"
     failed = "failed"
 
+
+class AssetPhase(str, PyEnum):
+    """Position of an asset in the review lifecycle.
+
+      * ``internal``  — KPI internal QA cycle. Editor uploads, producer/reviewer
+                        comments. Client cannot see anything yet.
+      * ``client``    — Asset has been sent to the external client. Share-link
+                        viewer filters versions and comments to only those at or
+                        after ``phase_client_at`` (the moment the producer
+                        clicked Send to client). ``client_baseline_version_id``
+                        points to the version that was current at that moment.
+      * ``delivered`` — Final, client-approved. ``delivered_version_id`` points
+                        to the final version. New share-links default to view-only.
+
+    Phase advances are ONE-WAY (internal → client → delivered). Backwards
+    moves are forbidden by the API. Once a client has seen a version, the
+    filter window is irreversible.
+    """
+    internal = "internal"
+    client = "client"
+    delivered = "delivered"
+
+
+class AssetPriority(str, PyEnum):
+    """Producer-set urgency tier.
+
+      * ``P0`` — drop everything (client deadline, paid campaign, partner commit)
+      * ``P1`` — committed for the current week (default for client work)
+      * ``P2`` — committed for the quarter; backlog
+    """
+    P0 = "P0"
+    P1 = "P1"
+    P2 = "P2"
+
+
 class Asset(Base):
     __tablename__ = "assets"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -41,8 +76,25 @@ class Asset(Base):
     status: Mapped[AssetStatus] = mapped_column(Enum(AssetStatus), default=AssetStatus.draft)
     rating: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     assignee_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    # "Who internally signs off on the cut" — producer who runs review. Distinct
+    # from assignee (who's actively working). Set by producer when assigning the task.
+    reviewer_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("folders.id"), nullable=True, index=True)
     due_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    priority: Mapped[Optional[AssetPriority]] = mapped_column(Enum(AssetPriority), nullable=True, index=True)
+    phase: Mapped[AssetPhase] = mapped_column(Enum(AssetPhase), nullable=False, default=AssetPhase.internal, index=True)
+    # Phase transition tracking — filled when phase advances. Used by the share
+    # viewer to filter versions+comments for guest views (only items >= these
+    # timestamps + the baseline version are visible). See models/share.py.
+    phase_client_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    phase_delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    client_baseline_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("asset_versions.id"), nullable=True)
+    delivered_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("asset_versions.id"), nullable=True)
+    block_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # Video-specific custom fields (format/goal/source/style/talent) — validated
+    # against schemas/video_fields.py. JSON for flexibility; columns above for
+    # cross-cutting filtering (priority, phase, assignee, reviewer).
+    custom_fields: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, default=dict)
     keywords: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True, default=list)
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

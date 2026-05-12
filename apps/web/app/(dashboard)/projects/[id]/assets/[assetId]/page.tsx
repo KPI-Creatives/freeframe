@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import useSWR from 'swr'
 import { ReviewProvider, useReview } from '@/components/review/review-provider'
@@ -20,6 +20,10 @@ import { useAuthStore } from '@/stores/auth-store'
 import { useComments } from '@/hooks/use-comments'
 import { api } from '@/lib/api'
 import { useUploadStore } from '@/stores/upload-store'
+import { AssetWorkflowFields } from '@/components/projects/asset-workflow-fields'
+import { SendToClientDialog } from '@/components/projects/send-to-client-dialog'
+import { MarkDeliveredDialog } from '@/components/projects/mark-delivered-dialog'
+import { HandoffDialog } from '@/components/projects/handoff-dialog'
 import { useBreadcrumbStore } from '@/stores/breadcrumb-store'
 import {
   ArrowLeft,
@@ -29,6 +33,9 @@ import {
   Loader2,
   Columns2,
   Upload,
+  Send,
+  PackageCheck,
+  Eye,
 } from 'lucide-react'
 import Link from 'next/link'
 import { cn } from '@/lib/utils'
@@ -50,6 +57,13 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
   const { currentVersion, isDrawingMode, focusedCommentId, seekTo, setFocusedCommentId, setActiveAnnotation } = useReviewStore()
   const { user } = useAuthStore()
   const startVersionUpload = useUploadStore((s) => s.startVersionUpload)
+  const currentUser = useAuthStore((s) => s.user)
+  const isProducerPlus = currentUser?.role === 'producer' || currentUser?.role === 'admin'
+
+  const [showSendToClient, setShowSendToClient] = useState(false)
+  const [showMarkDelivered, setShowMarkDelivered] = useState(false)
+  const [showHandoff, setShowHandoff] = useState(false)
+  const [previewAsClient, setPreviewAsClient] = useState(false)
   const versionFileInputRef = useRef<HTMLInputElement>(null)
   const setExtraCrumbs = useBreadcrumbStore((s) => s.setExtraCrumbs)
   const setLabel = useBreadcrumbStore((s) => s.setLabel)
@@ -126,6 +140,28 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
     addReaction,
     removeReaction,
   } = useComments(asset?.id || '', currentVersion?.id || '')
+
+  // N1.B Preview-as-Client — apply the same phase-window filter the share
+  // viewer uses, computed client-side. The truth from the backend (full
+  // comments + versions) is kept untouched; this is a UI overlay only.
+  const phaseFloor = asset?.phase_client_at ? new Date(asset.phase_client_at).getTime() : null
+  const baselineVersionId = asset?.client_baseline_version_id ?? null
+  const previewActive = previewAsClient && phaseFloor !== null
+  const visibleComments = useMemo(() => {
+    if (!previewActive) return comments
+    return (comments ?? []).filter((c: any) => {
+      const t = c?.created_at ? new Date(c.created_at).getTime() : 0
+      return t >= (phaseFloor ?? 0)
+    })
+  }, [comments, previewActive, phaseFloor])
+  const visibleVersions = useMemo(() => {
+    if (!previewActive) return versions
+    return (versions ?? []).filter((v: any) => {
+      if (baselineVersionId && v?.id === baselineVersionId) return true
+      const t = v?.created_at ? new Date(v.created_at).getTime() : 0
+      return t >= (phaseFloor ?? 0)
+    })
+  }, [versions, previewActive, phaseFloor, baselineVersionId])
 
   // Deep-link to a specific comment from notification (?commentId=...)
   // Runs once after comments are loaded — seeks to timecode, focuses comment, shows annotation
@@ -267,7 +303,7 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
         return (
           <VideoPlayer
             assetId={asset.id}
-            comments={comments}
+            comments={visibleComments}
             className="flex-1 min-h-0"
             overlay={
               <>
@@ -286,7 +322,7 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
           <AudioPlayer
             asset={asset}
             version={currentVersion}
-            comments={comments}
+            comments={visibleComments}
             className="flex-1"
           />
         )
@@ -376,11 +412,17 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
               if (!file || !asset) return
               startVersionUpload(file, asset.id, asset.name, asset.project_id)
               e.target.value = ''
-              // Refetch versions after a short delay to show the new uploading version
+              // Refetch versions and prompt the hand-off modal. We open the
+              // modal optimistically — the upload itself is async and may still
+              // be in progress, but the producer-assign decision doesn't depend
+              // on upload completion (you can decide who reviews while the file
+              // is still being processed). HandoffDialog auto-closes if the
+              // project has no producer-or-above members.
               setTimeout(() => refetchVersions(), 800)
+              setShowHandoff(true)
             }}
           />
-          <VersionSwitcher versions={versions} />
+          <VersionSwitcher versions={visibleVersions} />
           <button
             onClick={() => versionFileInputRef.current?.click()}
             className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-8 text-xs font-medium border border-border text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
@@ -389,7 +431,76 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
             <Upload className="h-3.5 w-3.5" />
             New Version
           </button>
+          {/* Preview as client — visible to anyone, applies phase filter locally. */}
+          <button
+            onClick={() => setPreviewAsClient((p) => !p)}
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-md px-2.5 h-8 text-xs font-medium border transition-colors',
+              previewAsClient
+                ? 'bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]'
+                : 'border-border text-text-secondary hover:text-text-primary hover:bg-bg-hover',
+            )}
+            title={previewAsClient ? 'Showing what the client sees — click to exit' : 'Preview as client'}
+          >
+            <Eye className="h-3.5 w-3.5" />
+            {previewAsClient ? 'Exit preview' : 'Preview as client'}
+          </button>
+
+          {/* Producer-only actions. The backend gate enforces this regardless; */}
+          {/* hiding the buttons spares editors the 403 round-trip.            */}
+          {isProducerPlus && asset.phase !== 'delivered' && (
+            <button
+              onClick={() => setShowSendToClient(true)}
+              className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-8 text-xs font-medium bg-[var(--accent)] text-white hover:opacity-90 transition-opacity"
+              title={asset.phase === 'client' ? 'Re-send to client / new recipient' : 'Send to client review'}
+            >
+              <Send className="h-3.5 w-3.5" />
+              {asset.phase === 'client' ? 'Re-send to client' : 'Send to client'}
+            </button>
+          )}
+          {isProducerPlus && asset.phase === 'client' && (
+            <button
+              onClick={() => setShowMarkDelivered(true)}
+              className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-8 text-xs font-medium border border-status-success/40 text-status-success hover:bg-status-success/10 transition-colors"
+              title="Mark delivered"
+            >
+              <PackageCheck className="h-3.5 w-3.5" />
+              Mark delivered
+            </button>
+          )}
+
           <ShareDialog assetId={asset.id} assetName={asset.name} projectId={projectId} asset={asset} />
+
+          {/* N1.B dialogs (rendered out-of-flow via Radix portal). */}
+          <SendToClientDialog
+            assetId={asset.id}
+            assetName={asset.name}
+            open={showSendToClient}
+            onOpenChange={setShowSendToClient}
+            onSuccess={() => {
+              // Bump SWR cache for the asset so phase / phase_client_at refresh.
+              import('swr').then(({ mutate }) => mutate(`/assets/${asset.id}`))
+            }}
+          />
+          <MarkDeliveredDialog
+            assetId={asset.id}
+            assetName={asset.name}
+            open={showMarkDelivered}
+            onOpenChange={setShowMarkDelivered}
+            onSuccess={() => {
+              import('swr').then(({ mutate }) => mutate(`/assets/${asset.id}`))
+            }}
+          />
+          <HandoffDialog
+            assetId={asset.id}
+            projectId={asset.project_id}
+            open={showHandoff}
+            onOpenChange={setShowHandoff}
+            onHandedOff={() => {
+              import('swr').then(({ mutate }) => mutate(`/assets/${asset.id}`))
+            }}
+          />
+
           <button
             onClick={() => setSidebarOpen((p) => !p)}
             className={cn(
@@ -405,6 +516,14 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
         </div>
       </div>
 
+      {previewActive && (
+        <div className="shrink-0 border-b border-[var(--accent)]/40 bg-[var(--accent)]/10 px-3 py-1.5 text-xs text-text-secondary flex items-center gap-2">
+          <Eye className="h-3.5 w-3.5 text-[var(--accent)]" />
+          <span>
+            <strong className="text-[var(--accent)]">Preview as client</strong> — showing only versions and comments visible to a client share-link viewer. KPI-internal history is hidden.
+          </span>
+        </div>
+      )}
       {/* ─── Main content: viewer + sidebar ────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden min-h-0">
         {/* Left: viewer column */}
@@ -449,7 +568,7 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
               {activeTab === 'comments' ? (
                 <>
                   <CommentPanel
-                    comments={comments as any}
+                    comments={visibleComments as any}
                     currentUserId={user?.id}
                     onResolve={resolveComment}
                     onDelete={deleteComment}
@@ -469,8 +588,11 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
                   )}
                 </>
               ) : (
-                <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                  <div className="space-y-3">
+                <div className="flex-1 overflow-y-auto p-4 space-y-5">
+                  {/* N1.B editable workflow fields. Read-only meta stays below. */}
+                  <AssetWorkflowFields asset={asset} />
+
+                  <div className="space-y-3 pt-3 border-t border-border">
                     <div className="flex items-center justify-between">
                       <span className="text-xs text-text-tertiary">Name</span>
                       <span className="text-xs text-text-primary font-medium truncate ml-4">{asset.name}</span>

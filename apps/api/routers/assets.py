@@ -8,11 +8,11 @@ from typing import Optional
 from ..database import get_db
 from ..middleware.auth import get_current_user
 from ..models.user import User
-from ..models.asset import Asset, AssetVersion, MediaFile, AssetType, FileType, ProcessingStatus
+from ..models.asset import Asset, AssetVersion, MediaFile, AssetType, FileType, ProcessingStatus, AssetPhase, AssetPriority
 from ..models.project import Project, ProjectMember, ProjectRole
 from ..models.share import AssetShare
 from ..models.activity import Mention, Notification, NotificationType
-from ..schemas.asset import AssetResponse, AssetVersionResponse, AssetUpdate, StreamUrlResponse, MediaFileResponse
+from ..schemas.asset import AssetResponse, AssetVersionResponse, AssetUpdate, StreamUrlResponse, MediaFileResponse, SendToClientRequest, MarkDeliveredRequest
 from ..schemas.notification import AssignmentUpdate
 from ..services.permissions import require_project_role, require_asset_access, can_access_asset, is_public_project, get_project_member
 from ..services.s3_service import generate_presigned_get_url, build_download_filename
@@ -177,7 +177,62 @@ def update_asset(
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     require_project_role(db, asset.project_id, current_user, ProjectRole.editor)
-    for field, value in body.model_dump(exclude_unset=True).items():
+
+    updates = body.model_dump(exclude_unset=True)
+
+    # Phase transition guards. Phase is producer-managed; advancing it via this
+    # generic PATCH is allowed (Send-to-client and Mark-delivered also funnel
+    # through here for the column write, but they're more typically called via
+    # their dedicated atomic endpoints). Going BACKWARDS is forbidden — once a
+    # client has seen something, the filter window is one-way.
+    if "phase" in updates:
+        new_phase = updates["phase"]
+        if isinstance(new_phase, str):
+            try:
+                new_phase = AssetPhase(new_phase)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid phase '{new_phase}'")
+        order = {AssetPhase.internal: 0, AssetPhase.client: 1, AssetPhase.delivered: 2}
+        current_rank = order.get(asset.phase, 0)
+        new_rank = order.get(new_phase, 0)
+        if new_rank < current_rank:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Phase cannot move backwards ({asset.phase.value} -> {new_phase.value}). "
+                    "Once an asset has been sent to client or delivered, the visibility "
+                    "window is irreversible. Create a new asset if you need a fresh start."
+                ),
+            )
+        # Side effects when advancing through the funnel — fill the matching
+        # timestamp + baseline pointer if not already set.
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        if new_phase == AssetPhase.client and asset.phase_client_at is None:
+            asset.phase_client_at = now
+            if asset.client_baseline_version_id is None:
+                # Latest non-deleted version becomes the baseline (the one the
+                # client sees as their starting point).
+                from ..models.asset import AssetVersion
+                latest = db.query(AssetVersion).filter(
+                    AssetVersion.asset_id == asset.id,
+                    AssetVersion.deleted_at.is_(None),
+                ).order_by(AssetVersion.version_number.desc()).first()
+                if latest is not None:
+                    asset.client_baseline_version_id = latest.id
+        elif new_phase == AssetPhase.delivered and asset.phase_delivered_at is None:
+            asset.phase_delivered_at = now
+            if asset.delivered_version_id is None:
+                from ..models.asset import AssetVersion
+                latest = db.query(AssetVersion).filter(
+                    AssetVersion.asset_id == asset.id,
+                    AssetVersion.deleted_at.is_(None),
+                ).order_by(AssetVersion.version_number.desc()).first()
+                if latest is not None:
+                    asset.delivered_version_id = latest.id
+        updates["phase"] = new_phase
+
+    for field, value in updates.items():
         setattr(asset, field, value)
     db.commit()
     db.refresh(asset)
@@ -467,3 +522,232 @@ def cancel_version_processing(
     db.commit()
 
     return {"ok": True, "asset_id": str(asset_id), "version_id": str(version_id), "status": "failed"}
+
+
+# ─── N1.B — Producer atomic actions ──────────────────────────────────────────
+
+
+@router.post("/assets/{asset_id}/send-to-client", response_model=None)
+def send_asset_to_client(
+    asset_id: uuid.UUID,
+    body: SendToClientRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Atomic 'Send to client review'.
+
+    Five steps in one transaction (DB-level):
+      1. Asset.phase  → ``client`` (must not be ``delivered`` already).
+      2. ``phase_client_at`` set to now if first time.
+      3. ``client_baseline_version_id`` snapshots the current latest version
+         (the one the client sees as their starting point).
+      4. ShareLink minted for this asset with the given permission, optional
+         password and expiry.
+      5. Resend email queued to ``recipient_email`` with the share URL.
+
+    Permission model:
+      * Global gate:  caller must be producer or admin (UserRole).
+      * Project gate: caller must be a project member with editor+ rights.
+    Both are checked; failing either is 403.
+
+    Idempotency:
+      * Re-running on an asset already in ``client`` phase is allowed —
+        it does NOT reset ``phase_client_at`` or the baseline. Instead it
+        creates a NEW share-link (different token, different recipient is
+        a valid re-use case) and sends a fresh email.
+      * Re-running on an asset already in ``delivered`` phase is rejected
+        (400) — phase backwards is forbidden.
+
+    Returns the new share URL so the producer can copy it as a fallback
+    (in case the email gets caught in spam).
+    """
+    # Co-located imports so this endpoint stays self-contained.
+    from ..models.share import ShareLink, SharePermission
+    from ..services.permissions_role import require_role
+    from ..models.user import UserRole
+    from ..tasks.email_tasks import send_share_email
+    from ..tasks.celery_app import send_task_safe
+    from ..config import settings
+    from datetime import timedelta
+    import secrets, bcrypt
+    from ..services.encryption import encrypt_password
+
+    payload = body
+
+    # Permission gates.
+    if not require_role(UserRole.producer)(current_user):
+        # ``require_role`` returns the user when allowed; raises 403 otherwise.
+        # The 'if not' branch is defensive — control should not reach here.
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    asset = db.query(Asset).filter(
+        Asset.id == asset_id,
+        Asset.deleted_at.is_(None),
+    ).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    require_project_role(db, asset.project_id, current_user, ProjectRole.editor)
+
+    # Forbid backwards phase transition (delivered → client).
+    if asset.phase == AssetPhase.delivered:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Asset is already delivered. Phase cannot move backwards. "
+                "If the client needs to review again, create a new asset."
+            ),
+        )
+
+    # Validate permission enum.
+    try:
+        permission = SharePermission(payload.permission)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid permission '{payload.permission}' — expected view, comment, or approve",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    # ── Phase transition (only if not already in client phase) ───────────
+    if asset.phase != AssetPhase.client:
+        # Snapshot the latest version as the client baseline.
+        latest = db.query(AssetVersion).filter(
+            AssetVersion.asset_id == asset.id,
+            AssetVersion.deleted_at.is_(None),
+        ).order_by(AssetVersion.version_number.desc()).first()
+        asset.phase = AssetPhase.client
+        asset.phase_client_at = now
+        if latest is not None:
+            asset.client_baseline_version_id = latest.id
+
+    # ── Mint share-link ──────────────────────────────────────────────────
+    token = secrets.token_urlsafe(32)
+    password_hash = None
+    password_encrypted = None
+    if payload.password:
+        pwd_bytes = payload.password[:72].encode("utf-8")
+        password_hash = bcrypt.hashpw(pwd_bytes, bcrypt.gensalt()).decode("utf-8")
+        password_encrypted = encrypt_password(payload.password)
+
+    expires_at = None
+    if payload.expires_in_days is not None and payload.expires_in_days > 0:
+        expires_at = now + timedelta(days=payload.expires_in_days)
+
+    link = ShareLink(
+        asset_id=asset.id,
+        token=token,
+        created_by=current_user.id,
+        title=asset.name,
+        description=payload.message,
+        expires_at=expires_at,
+        password_hash=password_hash,
+        password_encrypted=password_encrypted,
+        permission=permission,
+        # show_versions stays True at the model level — phase filter applies
+        # at the viewer layer, so this column doesn't need toggling.
+    )
+    db.add(link)
+    db.commit()
+    db.refresh(link)
+    db.refresh(asset)
+
+    # ── Email the client ─────────────────────────────────────────────────
+    share_url = f"{settings.frontend_url}/share/{token}"
+    send_task_safe(
+        send_share_email,
+        to_email=payload.recipient_email,
+        sharer_name=current_user.name or "KPI Creatives",
+        asset_name=asset.name,
+        asset_link=share_url,
+        permission=permission.value,
+        message=payload.message,
+    )
+
+    return {
+        "asset_id": str(asset.id),
+        "phase": asset.phase.value,
+        "phase_client_at": asset.phase_client_at.isoformat() if asset.phase_client_at else None,
+        "client_baseline_version_id": str(asset.client_baseline_version_id) if asset.client_baseline_version_id else None,
+        "share_link_id": str(link.id),
+        "share_url": share_url,
+    }
+
+
+@router.post("/assets/{asset_id}/mark-delivered", response_model=None)
+def mark_asset_delivered(
+    asset_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Atomic 'Mark delivered'.
+
+      1. Asset.phase  → ``delivered`` (only if currently ``client``).
+      2. ``phase_delivered_at`` set to now.
+      3. ``delivered_version_id`` snapshots the current latest version.
+      4. Any existing share-links on this asset get permission downgraded
+         to view-only — the client signed off, no more commenting needed.
+
+    Permission model:
+      * Global gate:  caller must be producer or admin.
+      * Project gate: caller must be a project member with editor+ rights.
+
+    Backwards transitions (delivered → client) are forbidden. If you need to
+    re-open a project after delivery, create a new asset.
+    """
+    from ..models.share import ShareLink, SharePermission
+    from ..services.permissions_role import require_role
+    from ..models.user import UserRole
+
+    if not require_role(UserRole.producer)(current_user):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    asset = db.query(Asset).filter(
+        Asset.id == asset_id,
+        Asset.deleted_at.is_(None),
+    ).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    require_project_role(db, asset.project_id, current_user, ProjectRole.editor)
+
+    # Phase semantics:
+    #   internal  → delivered  : allowed but unusual (no client review cycle).
+    #   client    → delivered  : the common path.
+    #   delivered → delivered  : idempotent (no-op).
+    if asset.phase == AssetPhase.delivered:
+        # Idempotent; return current state without changes.
+        downgraded = 0
+    else:
+        now = datetime.now(timezone.utc)
+        latest = db.query(AssetVersion).filter(
+            AssetVersion.asset_id == asset.id,
+            AssetVersion.deleted_at.is_(None),
+        ).order_by(AssetVersion.version_number.desc()).first()
+
+        asset.phase = AssetPhase.delivered
+        asset.phase_delivered_at = now
+        if latest is not None:
+            asset.delivered_version_id = latest.id
+
+        # Downgrade any active share-link on this asset to view-only — the
+        # client signed off; no further commenting/approving should happen.
+        active_links = db.query(ShareLink).filter(
+            ShareLink.asset_id == asset.id,
+            ShareLink.deleted_at.is_(None),
+        ).all()
+        downgraded = 0
+        for link in active_links:
+            if link.permission != SharePermission.view:
+                link.permission = SharePermission.view
+                downgraded += 1
+
+        db.commit()
+        db.refresh(asset)
+
+    return {
+        "asset_id": str(asset.id),
+        "phase": asset.phase.value,
+        "phase_delivered_at": asset.phase_delivered_at.isoformat() if asset.phase_delivered_at else None,
+        "delivered_version_id": str(asset.delivered_version_id) if asset.delivered_version_id else None,
+        "share_links_downgraded": downgraded,
+    }

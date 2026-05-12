@@ -14,7 +14,7 @@
   /* Borders */
   --border-primary: #2e2e3a;
   --border-secondary: #222230;
-  --border-focus: #5b8def;
+  --border-focus: #a694ff;       /* KPI purple */
 
   /* Text */
   --text-primary: #eaeaed;
@@ -22,10 +22,14 @@
   --text-tertiary: #5e5e6e;
   --text-inverse: #0d0d10;
 
-  /* Accent — blue */
-  --accent: #5b8def;
-  --accent-hover: #7aa3f5;
-  --accent-muted: #253556;
+  /* Accent — KPI Creatives brand purple (#a694ff) and deep blue (#211c60).
+     Source of truth: github.com/KPI-Creatives/kpi-creatives-web
+     src/styles/global.css → --color-purple / --color-blue. */
+  --accent: #a694ff;            /* KPI purple */
+  --accent-hover: #bdb0ff;      /* purple, +10% lightness for hover */
+  --accent-muted: #211c60;      /* KPI blue at full — reads as a deep purple
+                                   wash on dark surfaces; used for selection
+                                   backgrounds, ring offsets, soft halos. */
 
   /* Status */
   --status-success: #34d399;
@@ -56,16 +60,16 @@
 
   --border-primary: #e0e0e6;
   --border-secondary: #d0d0d8;
-  --border-focus: #4a7de8;
+  --border-focus: #6347ff;
 
   --text-primary: #1a1a2e;
   --text-secondary: #5a5a6e;
   --text-tertiary: #8a8a9e;
   --text-inverse: #ffffff;
 
-  --accent: #4a7de8;
-  --accent-hover: #3a6dd8;
-  --accent-muted: #e8eef8;
+  --accent: #6347ff;            /* darker KPI purple — reads on white */
+  --accent-hover: #4f31ff;
+  --accent-muted: #ede8ff;      /* very pale purple wash */
 
   --status-success: #16a34a;
   --status-warning: #ca8a04;

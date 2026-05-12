@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -27,6 +27,10 @@ class AssetVersionResponse(BaseModel):
     asset_id: uuid.UUID
     version_number: int
     processing_status: ProcessingStatus
+    # Editor-reported time spent on this version. ``None`` means the modal
+    # was skipped or the asset isn't tracked. UI shows it as ``v2 · 30m``
+    # in the version switcher when present.
+    minutes_spent: Optional[int] = None
     created_by: uuid.UUID
     created_at: datetime
     files: list[MediaFileResponse] = []
@@ -51,6 +55,9 @@ class AssetResponse(BaseModel):
     delivered_version_id: Optional[uuid.UUID] = None
     block_reason: Optional[str] = None
     custom_fields: Optional[dict] = None
+    # Time tracking — see models/asset.py for semantics.
+    track_time: bool = False
+    total_minutes_spent: int = 0
     due_date: Optional[datetime]
     keywords: Optional[list]
     created_by: uuid.UUID
@@ -77,6 +84,10 @@ class AssetUpdate(BaseModel):
     # validation lives at the router level rather than the schema level so
     # we can branch on asset_type.
     custom_fields: Optional[dict] = None
+    # Editor toggle in the Fields tab. Override the folder-resolved default.
+    # No "inherit" — once resolved on creation, it's a per-asset boolean
+    # forever (folder moves don't re-resolve).
+    track_time: Optional[bool] = None
     due_date: Optional[datetime] = None
     keywords: Optional[list] = None
 
@@ -135,3 +146,37 @@ class MarkDeliveredResponse(BaseModel):
     phase_delivered_at: datetime
     delivered_version_id: Optional[uuid.UUID] = None
     share_links_downgraded: int                 # how many existing share-links got dropped to view-only
+
+
+# ── Time-tracking request/response ────────────────────────────────────────────
+
+class LogTimeRequest(BaseModel):
+    """Body of POST /assets/:asset_id/versions/:version_id/log-time.
+
+    ``minutes_spent``:
+      * positive int, multiple of 5 — the editor's reported duration in min
+      * ``0`` — explicit zero (cleared / mistake)
+      * ``None`` — Skip pressed; treat as "unset"
+
+    Hard-cap at 24h * 60 = 1440 to catch accidental "1080" or "1200" typo
+    in the custom field. If someone actually spent more than a day on a
+    single version, that's two entries split across versions, not one.
+    """
+
+    minutes_spent: Optional[int] = Field(default=None, ge=0, le=1440)
+
+    @field_validator("minutes_spent")
+    @classmethod
+    def _multiple_of_five(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return v
+        if v % 5 != 0:
+            raise ValueError("minutes_spent must be a multiple of 5")
+        return v
+
+
+class LogTimeResponse(BaseModel):
+    asset_id: uuid.UUID
+    version_id: uuid.UUID
+    version_minutes_spent: Optional[int]
+    asset_total_minutes_spent: int

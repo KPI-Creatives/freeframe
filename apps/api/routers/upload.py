@@ -13,6 +13,7 @@ from ..services.s3_service import (
     complete_multipart_upload, abort_multipart_upload,
 )
 from ..services.permissions import get_project_member, require_project_role
+from ..services.folder_helpers import resolve_track_time_default
 from ..models.project import ProjectRole
 from ..schemas.upload import (
     InitiateUploadRequest, InitiateUploadResponse,
@@ -58,12 +59,18 @@ def initiate_upload(
             raise HTTPException(status_code=400, detail="Asset does not belong to the specified project")
     else:
         asset_type = mime_to_asset_type(body.mime_type, body.original_filename)
+        # Resolve folder's time-tracking policy ONCE at creation. Walk up
+        # the parent chain until we hit a non-'inherit' value; root
+        # default is off. After this, the boolean lives on the asset and
+        # is editable directly via PATCH /assets/:id (Fields tab).
+        track_time = resolve_track_time_default(db, body.folder_id)
         asset = Asset(
             project_id=body.project_id,
             name=body.asset_name,
             asset_type=asset_type,
             created_by=current_user.id,
             folder_id=body.folder_id,
+            track_time=track_time,
         )
         db.add(asset)
         db.flush()

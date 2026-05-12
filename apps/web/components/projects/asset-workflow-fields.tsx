@@ -16,6 +16,7 @@ import * as React from 'react'
 import useSWR, { mutate as globalMutate } from 'swr'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { TimeSpentSection } from './time-spent-section'
 import type {
   Asset,
   AssetPhase,
@@ -213,7 +214,44 @@ export function AssetWorkflowFields({ asset, onUpdated }: Props) {
             onBlur={(e) => patchAsset({ block_reason: e.target.value || null })}
           />
         </Row>
+
+        {/* Track editing time — folder-resolved at creation, editable
+            per-asset here. Flipping this to true on an existing asset does
+            NOT retroactively prompt for past versions; only future
+            uploads trigger the modal. Producer can backfill past versions
+            via the Time Spent section below. */}
+        <Row label="Track editing time">
+          <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="sr-only peer"
+              checked={!!localAsset.track_time}
+              onChange={(e) => patchAsset({ track_time: e.target.checked })}
+              disabled={busy}
+            />
+            <span
+              className={cn(
+                'relative inline-block h-4 w-7 rounded-full transition-colors',
+                localAsset.track_time ? 'bg-[var(--accent)]' : 'bg-bg-tertiary',
+                busy && 'opacity-50',
+              )}
+            >
+              <span
+                className={cn(
+                  'absolute top-0.5 left-0.5 h-3 w-3 rounded-full bg-white transition-transform',
+                  localAsset.track_time && 'translate-x-3',
+                )}
+              />
+            </span>
+            <span className="text-xs text-text-secondary">
+              {localAsset.track_time ? 'On' : 'Off'}
+            </span>
+          </label>
+        </Row>
       </Section>
+
+      {/* Time spent breakdown — only when tracking is on. */}
+      {localAsset.track_time && <TimeSpentSection asset={localAsset} />}
 
       {/* ── Video-specific fields (only when asset_type === 'video') ────────── */}
       {isVideo && (

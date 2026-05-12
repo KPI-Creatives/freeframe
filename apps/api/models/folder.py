@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime
+from enum import Enum as PyEnum
 from typing import Optional
 
-from sqlalchemy import String, DateTime, ForeignKey, func, Index
+from sqlalchemy import String, DateTime, ForeignKey, func, Index, Enum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +11,30 @@ try:
     from ..database import Base
 except ImportError:
     from database import Base
+
+
+class TimeTrackingDefault(str, PyEnum):
+    """Per-folder time-tracking policy.
+
+      * ``on``      — assets created in this folder get ``track_time=True``;
+                      every uploaded version triggers the log-time modal.
+      * ``off``     — assets created here get ``track_time=False``; no modal.
+                      Right for ``new-footages``/raw bins.
+      * ``inherit`` — defer to parent folder's policy. Walked up by
+                      ``services/folder_helpers.resolve_track_time_default``
+                      until a non-``inherit`` value is found; if the entire
+                      chain to root is ``inherit``, the resolved default is
+                      ``off`` (the conservative choice — don't ask unless a
+                      folder explicitly opts in).
+
+    Asset-level override lives on ``Asset.track_time`` (boolean). The folder
+    policy is only consulted at asset creation time — moving an asset
+    between folders later does NOT flip its ``track_time`` flag.
+    """
+
+    on = "on"
+    off = "off"
+    inherit = "inherit"
 
 
 class Folder(Base):
@@ -25,6 +50,13 @@ class Folder(Base):
         UUID(as_uuid=True), ForeignKey("folders.id"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Folder-level time-tracking policy. See TimeTrackingDefault docstring.
+    time_tracking_default: Mapped[TimeTrackingDefault] = mapped_column(
+        Enum(TimeTrackingDefault),
+        nullable=False,
+        default=TimeTrackingDefault.inherit,
+        server_default="inherit",
+    )
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )

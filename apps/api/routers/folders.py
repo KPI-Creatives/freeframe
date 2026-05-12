@@ -20,6 +20,7 @@ from ..schemas.folder import (
     FolderTreeNode,
     FolderUpdate,
 )
+from ..services.folder_helpers import resolve_track_time_default
 from ..services.permissions import require_project_role, get_project_member, is_public_project
 
 router = APIRouter(tags=["folders"])
@@ -92,6 +93,10 @@ def _compute_item_count(db: Session, folder_id: uuid.UUID) -> int:
 def _folder_to_response(db: Session, folder: Folder) -> FolderResponse:
     resp = FolderResponse.model_validate(folder)
     resp.item_count = _compute_item_count(db, folder.id)
+    # `time_tracking_resolved` is the effective bool after walking the
+    # parent chain. The UI uses this to show "Inherit (currently: on/off)"
+    # in the folder-settings dialog without re-doing the walk client-side.
+    resp.time_tracking_resolved = resolve_track_time_default(db, folder.id)
     return resp
 
 
@@ -162,6 +167,7 @@ def create_folder(
         parent_id=body.parent_id,
         name=body.name,
         created_by=current_user.id,
+        time_tracking_default=body.time_tracking_default,
     )
     db.add(folder)
     db.commit()
@@ -236,6 +242,7 @@ def get_folder_tree(
             id=f.id,
             name=f.name,
             parent_id=f.parent_id,
+            time_tracking_default=f.time_tracking_default,
             item_count=(subfolder_counts.get(f.id, 0) + asset_counts.get(f.id, 0)),
         )
 
@@ -261,6 +268,9 @@ def update_folder(
 
     if body.name is not None:
         folder.name = body.name
+
+    if body.time_tracking_default is not None:
+        folder.time_tracking_default = body.time_tracking_default
 
     # Handle parent_id move (only if explicitly set)
     if "parent_id" in body.model_fields_set:

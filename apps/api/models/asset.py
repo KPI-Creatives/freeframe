@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import Enum as PyEnum
 from typing import Optional
-from sqlalchemy import String, Enum, DateTime, ForeignKey, Integer, Float, func, UniqueConstraint, Index
+from sqlalchemy import String, Enum, DateTime, ForeignKey, Integer, Float, Boolean, func, UniqueConstraint, Index, CheckConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 try:
@@ -96,6 +96,20 @@ class Asset(Base):
     # cross-cutting filtering (priority, phase, assignee, reviewer).
     custom_fields: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, default=dict)
     keywords: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True, default=list)
+    # ── Time tracking ────────────────────────────────────────────────────
+    # `track_time` is resolved from the parent folder's `time_tracking_default`
+    # at asset creation time. After creation it lives on the asset and can be
+    # toggled directly via PATCH /assets/:id (Fields-tab in the UI). Moving an
+    # asset between folders does NOT re-resolve this flag — too surprising.
+    track_time: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    # Denormalised sum of `asset_versions.minutes_spent` for this asset.
+    # Updated in the same transaction as any change to a version's
+    # `minutes_spent`. Reads on the asset grid avoid having to aggregate.
+    total_minutes_spent: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -107,11 +121,23 @@ class Asset(Base):
 
 class AssetVersion(Base):
     __tablename__ = "asset_versions"
-    __table_args__ = (UniqueConstraint("asset_id", "version_number", name="uq_asset_versions_asset_version"),)
+    __table_args__ = (
+        UniqueConstraint("asset_id", "version_number", name="uq_asset_versions_asset_version"),
+        # Time-tracking entries are recorded in 5-minute increments. NULL means
+        # the editor either hasn't been asked yet (asset.track_time=False) or
+        # clicked Skip on the modal. Non-NULL must be >= 0 and a multiple of 5.
+        CheckConstraint(
+            "minutes_spent IS NULL OR (minutes_spent >= 0 AND minutes_spent % 5 = 0)",
+            name="ck_asset_versions_minutes_spent_5min_step",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     asset_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False, index=True)
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     processing_status: Mapped[ProcessingStatus] = mapped_column(Enum(ProcessingStatus), default=ProcessingStatus.uploading)
+    # Editor-reported time spent on this specific version. Multiples of 5 only;
+    # see the table-level CheckConstraint above. NULL = skipped or unset.
+    minutes_spent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

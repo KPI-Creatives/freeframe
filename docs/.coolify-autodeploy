@@ -1,0 +1,7 @@
+Coolify GitHub App deploy chain — last verified 2026-05-11.
+
+When this file's mtime changes, a push to main went through:
+  GitHub (KPI-Creatives/freeframe) → GitHub App 'kpi-coolify'
+  → webhook → coolify.kpicreatives.com → auto-deploy freeframe-pilot.
+
+Keep this file. It's a probe, not generated.

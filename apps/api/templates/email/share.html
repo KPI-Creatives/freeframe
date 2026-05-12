@@ -1,23 +1,39 @@
 {% extends "email/base.html" %}
 
 {% block content %}
-<h2>{{ sharer_name }} shared "{{ asset_name }}" with you</h2>
-<p>Please leave your comments and notes in FreeFrame.</p>
+<h1>A new cut is ready for your review</h1>
+
+<p>Hi there,</p>
+
+<p>
+    Take a look at the latest cut of <strong>{{ asset_name }}</strong> and leave
+    your notes directly on the video — timecoded comments, annotations, or a
+    thumbs-up if it lands.
+</p>
+
+<p>
+    The sooner this loop closes, the sooner the next piece in your content
+    system goes into production.
+</p>
+
 {% if message %}
 <div class="quote">{{ message }}</div>
 {% endif %}
-<p style="text-align: center; margin: 24px 0;">
-    <a href="{{ asset_link }}" class="button" style="padding: 14px 32px; font-size: 16px;">Review Now</a>
+
+<p style="text-align: center; margin: 28px 0;">
+    <a href="{{ asset_link }}" class="button">Open the review →</a>
 </p>
-<div class="footer-note" style="margin-top: 32px; padding-top: 20px; border-top: 1px solid #eee;">
-    <p class="muted" style="font-size: 13px; color: #888;">
-        You have received this email because <strong>{{ sharer_name }}</strong> invited you to review content on FreeFrame.
-        If you don't recognize this email, please verify before accepting the invitation.
-    </p>
-    {% if permission %}
-    <p class="muted" style="font-size: 13px; color: #888;">
-        Share link creators may be able to see when you've viewed or downloaded assets.
-    </p>
-    {% endif %}
-</div>
+
+<p class="signoff">— {{ sharer_name }}, KPI Creatives</p>
+
+<p class="muted" style="margin-top: 28px; padding-top: 16px; border-top: 1px solid #e8e5f5;">
+    You're receiving this email because <strong>{{ sharer_name }}</strong> at
+    KPI Creatives invited you to review content. If this looks unfamiliar, you
+    can ignore it safely — no account was created.
+</p>
+{% if permission %}
+<p class="muted">
+    Share link creators may be able to see when you've viewed or downloaded assets.
+</p>
+{% endif %}
 {% endblock %}

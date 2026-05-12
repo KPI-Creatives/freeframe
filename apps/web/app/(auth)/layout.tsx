@@ -2,7 +2,7 @@ import type { Metadata } from 'next'
 import Image from 'next/image'
 
 export const metadata: Metadata = {
-  title: 'FreeFrame — Auth',
+  title: 'Sign in · KPI Creatives',
 }
 
 export default function AuthLayout({

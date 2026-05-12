@@ -11,12 +11,15 @@ import {
   Pencil,
   FolderPlus,
   Trash,
+  Settings,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FolderTreeNode } from '@/types'
+import { FolderSettingsDialog } from './folder-settings-dialog'
 
 interface FolderTreeProps {
   tree: FolderTreeNode[]
+  projectId: string
   projectName: string
   currentFolderId: string | null // null = root
   showTrash: boolean
@@ -32,22 +35,26 @@ interface FolderTreeProps {
 interface FolderNodeProps {
   node: FolderTreeNode
   depth: number
+  projectId: string
   currentFolderId: string | null
   onSelectFolder: (folderId: string | null) => void
   onCreateFolder: (name: string, parentId: string | null) => Promise<void>
   onRenameFolder: (folderId: string, name: string) => Promise<void>
   onDeleteFolder: (folderId: string) => Promise<void>
+  onOpenSettings: (node: FolderTreeNode) => void
   onDropItems?: (targetFolderId: string | null, assetIds: string[], folderIds: string[]) => void
 }
 
 function FolderNode({
   node,
   depth,
+  projectId,
   currentFolderId,
   onSelectFolder,
   onCreateFolder,
   onRenameFolder,
   onDeleteFolder,
+  onOpenSettings,
   onDropItems,
 }: FolderNodeProps) {
   const [expanded, setExpanded] = useState(false)
@@ -187,6 +194,15 @@ function FolderNode({
           >
             <FolderPlus className="h-3 w-3" /> New Subfolder
           </button>
+          <button
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+            onClick={() => {
+              setMenuOpen(false)
+              onOpenSettings(node)
+            }}
+          >
+            <Settings className="h-3 w-3" /> Folder settings
+          </button>
           <div className="my-1 border-t border-border" />
           <button
             className="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] text-red-400 hover:bg-red-500/10"
@@ -210,11 +226,13 @@ function FolderNode({
               key={child.id}
               node={child}
               depth={depth + 1}
+              projectId={projectId}
               currentFolderId={currentFolderId}
               onSelectFolder={onSelectFolder}
               onCreateFolder={onCreateFolder}
               onRenameFolder={onRenameFolder}
               onDeleteFolder={onDeleteFolder}
+              onOpenSettings={onOpenSettings}
               onDropItems={onDropItems}
             />
           ))}
@@ -226,6 +244,7 @@ function FolderNode({
 
 export function FolderTree({
   tree,
+  projectId,
   projectName,
   currentFolderId,
   showTrash,
@@ -237,6 +256,7 @@ export function FolderTree({
   onDropItems,
 }: FolderTreeProps) {
   const [isDragOverRoot, setIsDragOverRoot] = useState(false)
+  const [settingsNode, setSettingsNode] = useState<FolderTreeNode | null>(null)
 
   return (
     <div className="space-y-0.5">
@@ -274,11 +294,13 @@ export function FolderTree({
           key={node.id}
           node={node}
           depth={1}
+          projectId={projectId}
           currentFolderId={currentFolderId}
           onSelectFolder={onSelectFolder}
           onCreateFolder={onCreateFolder}
           onRenameFolder={onRenameFolder}
           onDeleteFolder={onDeleteFolder}
+          onOpenSettings={(n) => setSettingsNode(n)}
           onDropItems={onDropItems}
         />
       ))}
@@ -296,6 +318,20 @@ export function FolderTree({
         <Trash2 className="h-3.5 w-3.5 shrink-0" />
         <span>Recently Deleted</span>
       </div>
+
+      {/* Folder settings dialog — opened from a node's context menu.
+          Mounted once at the tree root so the right-click on a deeply-nested
+          folder still gets a properly-z-indexed modal. */}
+      <FolderSettingsDialog
+        open={settingsNode !== null}
+        onClose={() => setSettingsNode(null)}
+        folder={settingsNode ? {
+          id: settingsNode.id,
+          name: settingsNode.name,
+          time_tracking_default: settingsNode.time_tracking_default,
+          projectId,
+        } : null}
+      />
     </div>
   )
 }

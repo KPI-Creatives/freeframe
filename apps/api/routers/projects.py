@@ -9,6 +9,7 @@ from ..models.user import User
 from ..models.project import Project, ProjectMember, ProjectRole
 from ..models.user import UserRole
 from ..models.asset import Asset, AssetVersion, MediaFile
+from ..models.folder import Folder, TimeTrackingDefault
 from ..schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse, ProjectMemberResponse, AddProjectMemberRequest, UpdateProjectMemberRequest
 
 
@@ -23,6 +24,24 @@ _DEFAULT_PROJECT_ROLE_BY_USER_ROLE = {
     UserRole.producer: ProjectRole.owner,     # Full Access
     UserRole.editor: ProjectRole.editor,      # Edit & Share
 }
+
+
+# Standard seeded folders for every new Frame project. Single source of truth
+# for the convention documented in ``workflows/video-pipeline.md`` —
+# producers don't have to remember to create these by hand, and the
+# time-tracking policies are pre-set:
+#
+#   * ``new-footages`` — raw cards, b-roll, unedited footage; tracking off
+#   * ``Review``       — edited cuts that need feedback; tracking on
+#   * ``delivery``     — final delivered cuts; tracking on
+#
+# Replaces the prior Frame.io-era split of ``internal-review`` +
+# ``client-review`` (visibility is now gated by ``Asset.phase``, not folder).
+_SEED_FOLDERS: list[tuple[str, TimeTrackingDefault]] = [
+    ("new-footages", TimeTrackingDefault.off),
+    ("Review", TimeTrackingDefault.on),
+    ("delivery", TimeTrackingDefault.on),
+]
 
 
 def _default_project_role_for(user: User) -> ProjectRole:
@@ -71,6 +90,18 @@ def create_project(body: ProjectCreate, db: Session = Depends(get_db), current_u
     db.flush()
     member = ProjectMember(project_id=project.id, user_id=current_user.id, role=ProjectRole.owner)
     db.add(member)
+    # Auto-seed the standard folder set with their time-tracking policies
+    # in the same transaction. See ``_SEED_FOLDERS`` above for rationale.
+    for name, policy in _SEED_FOLDERS:
+        db.add(
+            Folder(
+                project_id=project.id,
+                parent_id=None,
+                name=name,
+                time_tracking_default=policy,
+                created_by=current_user.id,
+            )
+        )
     db.commit()
     db.refresh(project)
     return project

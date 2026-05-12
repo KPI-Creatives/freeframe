@@ -4,6 +4,7 @@ import * as React from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { AlertCircle, Loader2, CheckCircle2, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { formatMinutes } from '@/components/projects/time-tracking-modal'
 import { useReviewStore } from '@/stores/review-store'
 import type { AssetVersion, AssetVersionStatus } from '@/types'
 
@@ -85,7 +86,17 @@ export function VersionSwitcher({ versions, className }: VersionSwitcherProps) {
                       isDisabled && 'opacity-50 cursor-not-allowed',
                     )}
                   >
-                    <span>v{version.version_number}</span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span>v{version.version_number}</span>
+                      {version.minutes_spent != null && version.minutes_spent > 0 && (
+                        <span
+                          className="text-[10px] text-text-tertiary tabular-nums"
+                          title="Time logged on this version"
+                        >
+                          · {formatMinutes(version.minutes_spent)}
+                        </span>
+                      )}
+                    </span>
                     <span
                       className={cn('inline-flex items-center gap-1 text-[11px]', statusCfg.className)}
                       title={statusCfg.label}

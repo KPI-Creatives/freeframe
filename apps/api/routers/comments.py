@@ -548,7 +548,16 @@ def list_share_comments(
     db: Session = Depends(get_db),
 ):
     """Public endpoint — list comments for a shared asset. No auth required.
-    For folder/project shares, pass asset_id as query param to get comments for a specific asset."""
+    For folder/project shares, pass asset_id as query param to get comments for a specific asset.
+
+    Phase-aware filtering (N1.B): if the asset is in ``client`` or ``delivered``
+    phase, only comments created AT OR AFTER ``asset.phase_client_at`` are
+    returned to guests. Internal-phase comments (Tania saying "redo the hook")
+    stay invisible to the client.
+
+    Internal KPI users hit the authenticated comments endpoints and see
+    everything.
+    """
     link = validate_share_link(db, token)
 
     # Determine the asset_id to list comments for
@@ -557,13 +566,24 @@ def list_share_comments(
         return {"comments": []}
     asset_id = target_asset_id
 
-    # Get top-level comments — reuse same format as authenticated endpoint
-    top_level = db.query(Comment).filter(
+    # Phase-aware floor: if the linked asset has advanced past internal,
+    # filter out comments that predate the phase transition.
+    from ..models.asset import Asset, AssetPhase
+    asset = db.query(Asset).filter(
+        Asset.id == asset_id,
+        Asset.deleted_at.is_(None),
+    ).first()
+
+    query = db.query(Comment).filter(
         Comment.asset_id == asset_id,
         Comment.parent_id.is_(None),
         Comment.deleted_at.is_(None),
-    ).order_by(Comment.created_at).all()
+    )
+    if asset is not None and asset.phase in (AssetPhase.client, AssetPhase.delivered) \
+            and asset.phase_client_at is not None:
+        query = query.filter(Comment.created_at >= asset.phase_client_at)
 
+    top_level = query.order_by(Comment.created_at).all()
     return [_build_comment_response(c, db) for c in top_level]
 
 

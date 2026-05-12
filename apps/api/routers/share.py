@@ -166,6 +166,56 @@ def _get_latest_media_file(db: Session, asset_id: uuid.UUID) -> Optional[MediaFi
     return db.query(MediaFile).filter(MediaFile.version_id == version.id).first()
 
 
+def _get_share_visible_media_file(db: Session, asset: Asset) -> Optional[MediaFile]:
+    """Like ``_get_latest_media_file`` but phase-aware.
+
+    For an asset shared with a client (phase=client or delivered), the
+    'latest visible' version is:
+
+      * the latest ready version uploaded AT OR AFTER ``phase_client_at``
+        (a client-cycle revision), OR
+      * the ``client_baseline_version_id`` snapshot if no client-cycle
+        revisions exist yet.
+
+    Internal-phase versions (Tania saw them, the client never has) stay
+    invisible — exactly the same filter principle as comments.
+
+    For phase=internal (the default), returns the absolute latest as
+    before — no filter.
+    """
+    from ..models.asset import AssetPhase
+
+    if asset.phase not in (AssetPhase.client, AssetPhase.delivered):
+        return _get_latest_media_file(db, asset.id)
+
+    phase_floor = asset.phase_client_at
+    if phase_floor is None:
+        # Defensive: phase flipped to client without a timestamp. Fall back
+        # to unfiltered latest so the client at least sees something.
+        return _get_latest_media_file(db, asset.id)
+
+    # Latest ready client-cycle version, if any.
+    later_version = db.query(AssetVersion).filter(
+        AssetVersion.asset_id == asset.id,
+        AssetVersion.deleted_at.is_(None),
+        AssetVersion.processing_status == ProcessingStatus.ready,
+        AssetVersion.created_at >= phase_floor,
+    ).order_by(AssetVersion.version_number.desc()).first()
+
+    target_version = later_version
+    if target_version is None and asset.client_baseline_version_id is not None:
+        # No client-cycle revision yet — show the baseline (the version that
+        # was current when the producer hit Send to client).
+        target_version = db.query(AssetVersion).filter(
+            AssetVersion.id == asset.client_baseline_version_id,
+            AssetVersion.deleted_at.is_(None),
+        ).first()
+
+    if target_version is None:
+        return None
+    return db.query(MediaFile).filter(MediaFile.version_id == target_version.id).first()
+
+
 # ── Share links ───────────────────────────────────────────────────────────────
 
 @router.post("/assets/{asset_id}/share", response_model=ShareLinkResponse, status_code=status.HTTP_201_CREATED)
@@ -1368,7 +1418,9 @@ def get_share_stream_url(
     # Validate asset belongs to this share
     _validate_asset_in_share(db, link, asset)
 
-    media_file = _get_latest_media_file(db, asset.id)
+    # Phase-aware: if the client is on a client-phase share, never expose
+    # internal-cycle versions (see _get_share_visible_media_file).
+    media_file = _get_share_visible_media_file(db, asset)
     if not media_file:
         raise HTTPException(status_code=404, detail="No ready media file found")
 

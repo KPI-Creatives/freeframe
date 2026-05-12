@@ -88,29 +88,49 @@ export function AssetWorkflowFields({ asset, onUpdated }: Props) {
     return map
   }, [users])
 
+  // Local copy of the asset for optimistic UI. The parent's ``asset`` prop is
+  // not held in SWR — it lives in ReviewProvider useState — so calling
+  // ``mutate('/assets/:id')`` is a no-op for refreshing the dropdowns. We
+  // instead apply the patch to local state immediately and revert on error.
+  //
+  // When the parent re-fetches and a fresh ``asset`` prop arrives, we resync
+  // local state via the id-based useEffect below. This keeps the local copy
+  // honest even if the producer leaves the tab and comes back.
+  const [localAsset, setLocalAsset] = React.useState(asset)
+  React.useEffect(() => {
+    setLocalAsset(asset)
+  }, [asset.id, asset.updated_at])
+
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
   const patchAsset = React.useCallback(
     async (body: Record<string, unknown>) => {
+      // Snapshot for rollback before we touch local state.
+      const before = localAsset
+      setLocalAsset((prev) => ({ ...prev, ...body } as typeof prev))
       setBusy(true)
       setError(null)
       try {
         await api.patch(`/assets/${asset.id}`, body)
-        globalMutate(`/assets/${asset.id}`)
+        // The server's response is the truth; we don't merge it here because
+        // we already applied the same change locally. The id-based effect
+        // above will sync when the parent re-fetches.
         onUpdated?.()
       } catch (e: unknown) {
+        // Revert the optimistic update.
+        setLocalAsset(before)
         const msg = e instanceof Error ? e.message : 'Failed to save'
         setError(msg)
       } finally {
         setBusy(false)
       }
     },
-    [asset.id, onUpdated],
+    [asset.id, localAsset, onUpdated],
   )
 
-  const isVideo = asset.asset_type === 'video'
-  const customFields: VideoCustomFields = asset.custom_fields ?? {}
+  const isVideo = localAsset.asset_type === 'video'
+  const customFields: VideoCustomFields = localAsset.custom_fields ?? {}
 
   return (
     <div className="space-y-5">
@@ -119,9 +139,9 @@ export function AssetWorkflowFields({ asset, onUpdated }: Props) {
         {/* Phase */}
         <Row label="Phase">
           <Select
-            value={asset.phase}
+            value={localAsset.phase}
             onChange={(v) => patchAsset({ phase: v })}
-            disabled={busy || asset.phase === 'delivered'}
+            disabled={busy || localAsset.phase === 'delivered'}
             options={[
               { value: 'internal', label: PHASE_LABELS.internal },
               { value: 'client', label: PHASE_LABELS.client },
@@ -133,7 +153,7 @@ export function AssetWorkflowFields({ asset, onUpdated }: Props) {
         {/* Priority */}
         <Row label="Priority">
           <Select
-            value={asset.priority ?? ''}
+            value={localAsset.priority ?? ''}
             onChange={(v) => patchAsset({ priority: v || null })}
             disabled={busy}
             options={[
@@ -150,7 +170,7 @@ export function AssetWorkflowFields({ asset, onUpdated }: Props) {
           <MemberSelect
             members={members ?? []}
             users={usersById}
-            value={asset.assignee_id}
+            value={localAsset.assignee_id}
             onChange={(uid) => patchAsset({ assignee_id: uid })}
             disabled={busy}
           />
@@ -161,7 +181,7 @@ export function AssetWorkflowFields({ asset, onUpdated }: Props) {
           <MemberSelect
             members={members ?? []}
             users={usersById}
-            value={asset.reviewer_id}
+            value={localAsset.reviewer_id}
             onChange={(uid) => patchAsset({ reviewer_id: uid })}
             disabled={busy}
           />
@@ -173,7 +193,7 @@ export function AssetWorkflowFields({ asset, onUpdated }: Props) {
             type="date"
             className={inputClass}
             disabled={busy}
-            defaultValue={(asset.due_date ?? '').split('T')[0]}
+            defaultValue={(localAsset.due_date ?? '').split('T')[0]}
             onBlur={(e) => {
               const v = e.target.value
               const next = v ? new Date(v).toISOString() : null
@@ -189,7 +209,7 @@ export function AssetWorkflowFields({ asset, onUpdated }: Props) {
             className={inputClass}
             placeholder="(none)"
             disabled={busy}
-            defaultValue={asset.block_reason ?? ''}
+            defaultValue={localAsset.block_reason ?? ''}
             onBlur={(e) => patchAsset({ block_reason: e.target.value || null })}
           />
         </Row>

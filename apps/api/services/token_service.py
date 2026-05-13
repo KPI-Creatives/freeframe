@@ -47,8 +47,12 @@ def mint_token() -> Tuple[str, str, str]:
     return public, prefix, hashed
 
 
-def verify_token(db: Session, token: str) -> Optional[ApiToken]:
-    """Return the matching live ApiToken row or None.
+def verify_token(db: Session, token: str) -> Optional[tuple[ApiToken, bool]]:
+    """Return ``(row, bumped)`` for a valid token or None.
+
+    ``bumped`` is True if the call updated ``last_used_at`` on the row
+    (i.e. more than 60s passed since the previous use). The caller must
+    commit if ``bumped`` is True — see the auth middleware.
 
     Cheap path: parse → lookup by prefix (indexed unique) → bcrypt compare.
     Side effect on success: bumps ``last_used_at``. We don't touch the DB
@@ -88,7 +92,19 @@ def verify_token(db: Session, token: str) -> Optional[ApiToken]:
     if not ok:
         return None
 
-    # Update last_used_at. We commit later in the same request lifecycle
-    # via the DB session that's normally committed on response.
-    row.last_used_at = datetime.now(timezone.utc)
-    return row
+    # Bump last_used_at, but only once per minute per token. Read-mostly
+    # endpoints get a write on every request otherwise — silly write
+    # amplification just to track a freshness column. 60s granularity is
+    # plenty for the "is this token still active?" review story.
+    #
+    # The caller (auth middleware) is responsible for committing the
+    # session if `bumped` is True; the FastAPI dependency session does
+    # not commit on its own for read-only request paths.
+    now = datetime.now(timezone.utc)
+    last = row.last_used_at
+    if last is not None and last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    bumped = last is None or (now - last).total_seconds() >= 60
+    if bumped:
+        row.last_used_at = now
+    return row, bumped

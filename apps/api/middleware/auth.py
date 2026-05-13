@@ -27,9 +27,20 @@ def _resolve_credentials(token: str, db: Session) -> Optional[User]:
     if not token:
         return None
     if token.startswith("ft_"):
-        row = verify_api_token(db, token)
-        if row is None:
+        result = verify_api_token(db, token)
+        if result is None:
             return None
+        row, bumped = result
+        if bumped:
+            # ``verify_token`` updated ``last_used_at`` on the row. The
+            # FastAPI dependency session doesn't commit on its own for
+            # read-only handlers — without this, the bump silently
+            # disappears at session close and the column never advances.
+            # Cheap commit; the token_service already throttled to 1/min.
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
         return get_user_by_id(db, row.user_id)
     # Fall through to JWT path
     payload = decode_token(token)

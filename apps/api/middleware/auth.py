@@ -5,23 +5,59 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..services.auth_service import decode_token, get_user_by_id
+from ..services.token_service import verify_token as verify_api_token
 from ..models.user import User, UserStatus
 
 bearer_scheme = HTTPBearer()
 optional_bearer_scheme = HTTPBearer(auto_error=False)
 
+
+def _resolve_credentials(token: str, db: Session) -> Optional[User]:
+    """Resolve a bearer credential to a User.
+
+    Accepts BOTH:
+      * session JWTs (``eyJ...``) issued by the login flow — same code path
+        as before, decode + lookup-by-sub.
+      * personal API tokens (``ft_<prefix>_<secret>``) issued via
+        ``POST /me/api-tokens`` — lookup-by-prefix + bcrypt-verify-secret.
+
+    The two formats are distinguished by the ``ft_`` namespace prefix so
+    we don't waste a JWT decode attempt on every API call.
+    """
+    if not token:
+        return None
+    if token.startswith("ft_"):
+        result = verify_api_token(db, token)
+        if result is None:
+            return None
+        row, bumped = result
+        if bumped:
+            # ``verify_token`` updated ``last_used_at`` on the row. The
+            # FastAPI dependency session doesn't commit on its own for
+            # read-only handlers — without this, the bump silently
+            # disappears at session close and the column never advances.
+            # Cheap commit; the token_service already throttled to 1/min.
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+        return get_user_by_id(db, row.user_id)
+    # Fall through to JWT path
+    payload = decode_token(token)
+    if not payload or payload.get("type") != "access":
+        return None
+    return get_user_by_id(db, uuid.UUID(payload["sub"]))
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    token = credentials.credentials
-    payload = decode_token(token)
-    if not payload or payload.get("type") != "access":
+    user = _resolve_credentials(credentials.credentials, db)
+    if user is None or user.status == UserStatus.deactivated:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-    user = get_user_by_id(db, uuid.UUID(payload["sub"]))
-    if not user or user.status == UserStatus.deactivated:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or deactivated")
     return user
+
 
 def get_optional_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_bearer_scheme),
@@ -31,13 +67,9 @@ def get_optional_user(
     if not credentials:
         return None
     try:
-        payload = decode_token(credentials.credentials)
-        if not payload or payload.get("type") != "access":
-            return None
-        user = get_user_by_id(db, uuid.UUID(payload["sub"]))
-        if not user or user.status == UserStatus.deactivated:
+        user = _resolve_credentials(credentials.credentials, db)
+        if user is None or user.status == UserStatus.deactivated:
             return None
         return user
     except Exception:
         return None
-

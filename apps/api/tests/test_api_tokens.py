@@ -82,7 +82,7 @@ def _db_returning(row):
 # ── verify_token happy path ──────────────────────────────────────────────────
 
 
-def test_verify_token_returns_row_for_valid_token():
+def test_verify_token_returns_row_tuple_for_valid_token():
     from apps.api.services.token_service import mint_token, verify_token
 
     public, _, hashed = mint_token()
@@ -90,8 +90,12 @@ def test_verify_token_returns_row_for_valid_token():
     db = _db_returning(row)
 
     out = verify_token(db, public)
-    assert out is row
-    assert row.last_used_at is not None  # bumped
+    assert out is not None
+    returned_row, bumped = out
+    assert returned_row is row
+    # First-ever use: bumped is True and last_used_at advanced.
+    assert bumped is True
+    assert row.last_used_at is not None
 
 
 # ── verify_token unhappy paths ───────────────────────────────────────────────
@@ -164,7 +168,10 @@ def test_verify_token_accepts_not_yet_expired():
     row = _mock_row(public, hashed, expires_at=future)
     db = _db_returning(row)
 
-    assert verify_token(db, public) is row
+    out = verify_token(db, public)
+    assert out is not None
+    returned_row, _bumped = out
+    assert returned_row is row
 
 
 def test_verify_token_naive_expires_at_treated_as_utc():
@@ -208,3 +215,33 @@ def test_editor_cannot_create():
     user = MagicMock()
     user.role = UserRole.editor
     assert not role_at_least(user, UserRole.producer)
+
+
+def test_verify_token_throttles_last_used_bumps_to_once_per_minute():
+    """Two verifies within 60 seconds: the first bumps, the second does not."""
+    from apps.api.services.token_service import mint_token, verify_token
+
+    public, _, hashed = mint_token()
+    row = _mock_row(public, hashed)
+    # Pretend the token was used 5 seconds ago — under the throttle window.
+    row.last_used_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    db = _db_returning(row)
+
+    out = verify_token(db, public)
+    assert out is not None
+    _row, bumped = out
+    assert bumped is False, "throttled: <60s since last use → no bump"
+
+
+def test_verify_token_bumps_again_after_minute_window():
+    from apps.api.services.token_service import mint_token, verify_token
+
+    public, _, hashed = mint_token()
+    row = _mock_row(public, hashed)
+    row.last_used_at = datetime.now(timezone.utc) - timedelta(seconds=120)
+    db = _db_returning(row)
+
+    out = verify_token(db, public)
+    assert out is not None
+    _row, bumped = out
+    assert bumped is True, "≥60s since last use → bump"

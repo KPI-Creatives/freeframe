@@ -24,6 +24,11 @@ import type { Comment } from "@/types";
 
 interface StreamUrlResponse {
   url: string;
+  // Hover-scrub sprite (worker-generated). Both nullable: legacy assets
+  // that haven't been re-processed via the sprite worker keep using the
+  // live-seek fallback inside ProgressBar.
+  sprite_url?: string | null;
+  sprite_vtt_url?: string | null;
 }
 
 interface VideoPlayerProps {
@@ -132,6 +137,8 @@ export function VideoPlayer({
 }: VideoPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
+  const [spriteUrl, setSpriteUrl] = useState<string | null>(null);
+  const [spriteVttUrl, setSpriteVttUrl] = useState<string | null>(null);
   const [loop, setLoop] = useState(false);
 
   const { isDrawingMode, timeFormat, setTimeFormat, setPlayheadTime, currentVersion } =
@@ -193,6 +200,9 @@ export function VideoPlayer({
           ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${data.url}`
           : data.url;
         setStreamUrl(url);
+        // Sprite URLs are already pre-signed absolute S3 URLs — pass through.
+        setSpriteUrl(data.sprite_url ?? null);
+        setSpriteVttUrl(data.sprite_vtt_url ?? null);
       })
       .catch(() => {
         /* stream URL errors handled by player error state */
@@ -364,6 +374,8 @@ export function VideoPlayer({
           buffered={buffered}
           comments={comments}
           streamUrl={streamUrl}
+          spriteUrl={spriteUrl}
+          spriteVttUrl={spriteVttUrl}
           onSeek={seek}
         />
       </div>

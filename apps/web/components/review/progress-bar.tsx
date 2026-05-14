@@ -39,21 +39,83 @@ interface ProgressBarProps {
   streamUrl?: string | null
   onSeek: (time: number) => void
   className?: string
+  /** Hover-scrub sprite sheet (worker-generated). Optional — falls
+   *  back to legacy live-seek preview when missing. */
+  spriteUrl?: string | null
+  spriteVttUrl?: string | null
 }
 
 // ─── Frame Preview Hook ───────────────────────────────────────────────────────
 
-function useFramePreview(streamUrl: string | null | undefined) {
+/**
+ * Hover-scrub frame preview.
+ *
+ * Two implementation paths, picked at runtime:
+ *
+ *   1. **Sprite + VTT (preferred)** — uses the worker-generated sprite
+ *      sheet (10×10 tiles) plus a WebVTT track that maps each cue to a
+ *      tile via ``#xywh=`` media fragment URIs. Render is a single
+ *      ``<img>`` with ``object-fit`` and a CSS ``transform`` so we slice
+ *      out the right tile. Instant, zero-bandwidth-after-load.
+ *
+ *   2. **Live seek (fallback)** — original hidden ``<video>`` + ``hls.js``
+ *      that seeks on hover and captures a canvas frame. Slower and
+ *      lagier, but works for assets that have not yet been processed by
+ *      the sprite worker (legacy uploads).
+ *
+ * Switches automatically based on the props the parent passes.
+ */
+function useFramePreview(
+  streamUrl: string | null | undefined,
+  spriteUrl: string | null | undefined,
+  spriteVttUrl: string | null | undefined,
+) {
+  // Sprite cues: parsed once from the VTT, then indexed by start time.
+  type Cue = { start: number; end: number; x: number; y: number; w: number; h: number }
+  const cuesRef = useRef<Cue[] | null>(null)
+  const [previewImage, setPreviewImage] = useState<string | null>(null)
+  const [spriteReady, setSpriteReady] = useState(false)
+
+  // Legacy hidden-video fallback (only used when sprite is unavailable).
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const previewHlsRef = useRef<Hls | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const seekResolveRef = useRef<(() => void) | null>(null)
   const readyRef = useRef(false)
-  const [previewImage, setPreviewImage] = useState<string | null>(null)
 
-  // Initialize hidden preview video + HLS
+  const hasSprite = Boolean(spriteUrl && spriteVttUrl)
+
+  // ── Sprite path: load + parse VTT, preload sprite image ──────────────────
   useEffect(() => {
-    if (!streamUrl) return
+    if (!hasSprite || !spriteVttUrl) return
+    let cancelled = false
+    setSpriteReady(false)
+    cuesRef.current = null
+
+    fetch(spriteVttUrl)
+      .then((r) => r.text())
+      .then((text) => {
+        if (cancelled) return
+        cuesRef.current = parseVtt(text)
+        if (cuesRef.current.length > 0) {
+          // Preload the sprite image so the first hover is instant.
+          const img = new Image()
+          img.crossOrigin = 'anonymous'
+          img.src = spriteUrl!
+          img.onload = () => { if (!cancelled) setSpriteReady(true) }
+          img.onerror = () => { if (!cancelled) setSpriteReady(false) }
+        }
+      })
+      .catch(() => {
+        if (!cancelled) cuesRef.current = null
+      })
+
+    return () => { cancelled = true }
+  }, [hasSprite, spriteUrl, spriteVttUrl])
+
+  // ── Legacy path: hidden video + hls.js (only if no sprite) ───────────────
+  useEffect(() => {
+    if (hasSprite || !streamUrl) return
 
     const video = document.createElement('video')
     video.muted = true
@@ -71,14 +133,9 @@ function useFramePreview(streamUrl: string | null | undefined) {
 
     const isHls = streamUrl.includes('.m3u8')
 
-    const onReady = () => {
-      readyRef.current = true
-    }
-
+    const onReady = () => { readyRef.current = true }
     video.addEventListener('loadeddata', onReady)
-
     video.addEventListener('seeked', () => {
-      // Capture frame
       try {
         const ctx = canvas.getContext('2d')
         if (ctx && video.videoWidth > 0) {
@@ -102,7 +159,7 @@ function useFramePreview(streamUrl: string | null | undefined) {
         enableWorker: false,
         maxBufferLength: 1,
         maxMaxBufferLength: 2,
-        maxBufferSize: 0.5 * 1024 * 1024, // 500KB — minimal buffering
+        maxBufferSize: 0.5 * 1024 * 1024,
       })
       previewHlsRef.current = hls
       hls.loadSource(streamUrl)
@@ -126,22 +183,69 @@ function useFramePreview(streamUrl: string | null | undefined) {
       canvasRef.current = null
       setPreviewImage(null)
     }
-  }, [streamUrl])
+  }, [hasSprite, streamUrl])
 
+  // ── seekPreview: pick code path ──────────────────────────────────────────
   const seekPreview = useCallback((time: number) => {
+    if (hasSprite && spriteReady && cuesRef.current && spriteUrl) {
+      // Binary search by start time would be ideal, but 100 cues is fine
+      // for linear scan and keeps the code readable.
+      const cues = cuesRef.current
+      const cue = cues.find((c) => time >= c.start && time < c.end) ?? cues[cues.length - 1]
+      if (!cue) return
+      // Encode the tile crop as an SVG data-URI so the existing <img>
+      // renderer stays unchanged. Cheap — string is ~200 bytes.
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${cue.w}" height="${cue.h}" viewBox="${cue.x} ${cue.y} ${cue.w} ${cue.h}">` +
+        `<image href="${spriteUrl}" />` +
+        `</svg>`
+      setPreviewImage(`data:image/svg+xml;utf8,${encodeURIComponent(svg)}`)
+      return
+    }
+    // Legacy seek fallback
     const video = previewVideoRef.current
     if (!video || !readyRef.current) return
-    // Debounce: if already seeking, skip
     if (seekResolveRef.current) return
     seekResolveRef.current = () => {}
     video.currentTime = Math.max(0, time)
-  }, [])
+  }, [hasSprite, spriteReady, spriteUrl])
 
   const clearPreview = useCallback(() => {
     setPreviewImage(null)
   }, [])
 
   return { previewImage, seekPreview, clearPreview }
+}
+
+
+// ─── VTT parser ──────────────────────────────────────────────────────────────
+
+function parseVtt(text: string): { start: number; end: number; x: number; y: number; w: number; h: number }[] {
+  const out: { start: number; end: number; x: number; y: number; w: number; h: number }[] = []
+  const lines = text.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)\s*-->\s*(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)/)
+    if (!m) continue
+    const toSec = (h: string, mi: string, s: string) => parseInt(h) * 3600 + parseInt(mi) * 60 + parseFloat(s)
+    const start = toSec(m[1], m[2], m[3])
+    const end = toSec(m[4], m[5], m[6])
+    // Next non-empty line should be the URL with #xywh=
+    let url = ''
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j].trim()) { url = lines[j].trim(); break }
+    }
+    const xywh = url.match(/#xywh=(\d+),(\d+),(\d+),(\d+)/)
+    if (!xywh) continue
+    out.push({
+      start,
+      end,
+      x: parseInt(xywh[1]),
+      y: parseInt(xywh[2]),
+      w: parseInt(xywh[3]),
+      h: parseInt(xywh[4]),
+    })
+  }
+  return out
 }
 
 // ─── Comment Marker ──────────────────────────────────────────────────────────
@@ -276,6 +380,8 @@ export function ProgressBar({
   buffered = 0,
   comments = [],
   streamUrl,
+  spriteUrl,
+  spriteVttUrl,
   onSeek,
   className,
 }: ProgressBarProps) {
@@ -286,7 +392,7 @@ export function ProgressBar({
   const [hoveredCommentId, setHoveredCommentId] = useState<string | null>(null)
   const focusedCommentId = useReviewStore((s) => s.focusedCommentId)
 
-  const { previewImage, seekPreview, clearPreview } = useFramePreview(streamUrl)
+  const { previewImage, seekPreview, clearPreview } = useFramePreview(streamUrl, spriteUrl, spriteVttUrl)
 
   const timeToPercent = useCallback(
     (time: number): number => {

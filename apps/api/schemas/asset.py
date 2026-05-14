@@ -15,6 +15,12 @@ class MediaFileResponse(BaseModel):
     s3_key_raw: str
     s3_key_processed: Optional[str]
     s3_key_thumbnail: Optional[str]
+    # Sprite preview: pre-signed URL to a JPG tiled sheet + a WebVTT track
+    # mapping timestamp ranges to tile rects. Player uses these for
+    # instant timeline-hover preview. Both None until sprite worker has
+    # produced them; client falls back to legacy live-seek preview then.
+    sprite_url: Optional[str] = None
+    sprite_vtt_url: Optional[str] = None
     width: Optional[int]
     height: Optional[int]
     duration_seconds: Optional[float]
@@ -95,6 +101,8 @@ class StreamUrlResponse(BaseModel):
     url: str
     asset_type: AssetType
     expires_in: int = 3600
+    sprite_url: Optional[str] = None
+    sprite_vtt_url: Optional[str] = None
 
 class NotificationResponse(BaseModel):
     id: uuid.UUID

@@ -350,7 +350,22 @@ def get_stream_url(
         else:
             url = generate_presigned_get_url(s3_key)
 
-    return StreamUrlResponse(url=url, asset_type=asset.asset_type)
+    # Hover-preview sprite (best-effort). Both can be None when the
+    # video was processed before the sprite worker landed; player falls
+    # back to its legacy hidden-video live seek preview in that case.
+    sprite_url = None
+    sprite_vtt_url = None
+    if asset.asset_type == AssetType.video:
+        if media_file.s3_key_sprite:
+            sprite_url = generate_presigned_get_url(media_file.s3_key_sprite)
+        if media_file.s3_key_sprite_vtt:
+            sprite_vtt_url = generate_presigned_get_url(media_file.s3_key_sprite_vtt)
+    return StreamUrlResponse(
+        url=url,
+        asset_type=asset.asset_type,
+        sprite_url=sprite_url,
+        sprite_vtt_url=sprite_vtt_url,
+    )
 
 
 @router.post("/assets/{asset_id}/versions", response_model=InitiateUploadResponse)

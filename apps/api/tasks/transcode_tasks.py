@@ -3,6 +3,10 @@ import sys
 import os
 import asyncio
 import json
+import math
+import subprocess
+import tempfile
+from pathlib import Path
 
 # Ensure the workspace root is on the path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
@@ -103,6 +107,23 @@ def _process_video(db, asset, version, media_file, s3, output_prefix):
         media_file.s3_key_thumbnail = result.thumbnail_keys[0]
     db.flush()
 
+    # Generate sprite sheet + WebVTT for timeline-hover preview. Failure
+    # here is non-fatal — playback still works, the player just falls
+    # back to the live-seek preview when sprite keys are NULL.
+    try:
+        sprite_key, vtt_key = _generate_sprite(
+            s3=s3,
+            input_s3_key=media_file.s3_key_raw,
+            output_prefix=output_prefix,
+            duration_seconds=media_file.duration_seconds or (result.duration_seconds if hasattr(result, "duration_seconds") else None),
+        )
+        media_file.s3_key_sprite = sprite_key
+        media_file.s3_key_sprite_vtt = vtt_key
+        db.flush()
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning("sprite generation failed: %s", exc, exc_info=True)
+
 
 def _process_audio(db, asset, version, media_file, s3, output_prefix):
     from packages.transcoder.image_processor import process_audio
@@ -119,6 +140,134 @@ def _process_image(db, asset, version, media_file, s3, output_prefix):
     media_file.s3_key_processed = result.get("webp_key")
     media_file.s3_key_thumbnail = result.get("thumbnail_key")
     db.flush()
+
+
+def _generate_sprite(s3, input_s3_key: str, output_prefix: str, duration_seconds: float | None) -> tuple[str, str]:
+    """Generate sprite-sheet JPG + WebVTT track for hover-scrub preview.
+
+    Strategy:
+      1. Stream raw input from S3 via presigned URL (no full local copy).
+      2. ffmpeg picks ``GRID*GRID`` (default 10x10 = 100) evenly spaced
+         frames, scales each to TILE_W x TILE_H, and tiles them into a
+         single JPG.
+      3. Build a WebVTT track that maps each timestamp range
+         ``[i*step, (i+1)*step)`` to the tile at row=i//GRID col=i%GRID
+         via the ``#xywh=`` media-fragment URI syntax.
+
+    Returns ``(sprite_s3_key, vtt_s3_key)``. Raises on failure.
+
+    The chosen 10x10 / 160x90 px tile gives:
+      sprite size  ~1.5 MB
+      VTT size     ~10 KB
+      total cost   <2 MB per video.
+    Cheaper than one HLS segment.
+    """
+    if not duration_seconds or duration_seconds <= 0:
+        raise RuntimeError("duration_seconds required for sprite generation")
+
+    GRID = 10
+    TILE_W = 160
+    TILE_H = 90
+    n_frames = GRID * GRID
+    step = duration_seconds / n_frames  # seconds between captured frames
+
+    # Get a presigned read URL so ffmpeg can stream directly from R2.
+    input_url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": settings.s3_bucket, "Key": input_s3_key},
+        ExpiresIn=3600,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sprite_path = Path(tmp) / "sprite.jpg"
+        vtt_path = Path(tmp) / "sprite.vtt"
+
+        # ffmpeg expression: 1 frame every ``step`` seconds, scale, tile.
+        # ``-frames:v 1`` to write a single output image (the tiled mosaic).
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-i", input_url,
+            "-vf", f"fps=1/{step:.6f},scale={TILE_W}:{TILE_H}:force_original_aspect_ratio=decrease,pad={TILE_W}:{TILE_H}:(ow-iw)/2:(oh-ih)/2:color=black,tile={GRID}x{GRID}",
+            "-frames:v", "1",
+            "-q:v", "5",  # JPG quality 1-31, lower=better; 5 ~= 80-85% q
+            str(sprite_path),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+
+        # WebVTT: one cue per tile, mapping `step` of seconds to the tile rect.
+        with vtt_path.open("w") as f:
+            f.write("WEBVTT\n\n")
+            for i in range(n_frames):
+                start = i * step
+                end = min((i + 1) * step, duration_seconds)
+                col = i % GRID
+                row = i // GRID
+                x = col * TILE_W
+                y = row * TILE_H
+                f.write(
+                    f"{_fmt_vtt(start)} --> {_fmt_vtt(end)}\n"
+                    f"sprite.jpg#xywh={x},{y},{TILE_W},{TILE_H}\n\n"
+                )
+
+        sprite_key = f"{output_prefix}/sprite.jpg"
+        vtt_key = f"{output_prefix}/sprite.vtt"
+        with sprite_path.open("rb") as f:
+            s3.put_object(Bucket=settings.s3_bucket, Key=sprite_key, Body=f, ContentType="image/jpeg")
+        with vtt_path.open("rb") as f:
+            s3.put_object(Bucket=settings.s3_bucket, Key=vtt_key, Body=f, ContentType="text/vtt")
+
+    return sprite_key, vtt_key
+
+
+def _fmt_vtt(seconds: float) -> str:
+    """Format seconds as HH:MM:SS.mmm for WebVTT cues."""
+    if seconds < 0:
+        seconds = 0
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds - h * 3600 - m * 60
+    return f"{h:02d}:{m:02d}:{s:06.3f}"
+
+
+@celery_app.task(bind=True, max_retries=2, default_retry_delay=120)
+def regenerate_sprite(self, media_file_id: str):
+    """Backfill task: re-run sprite generation for an existing media_file.
+
+    Used to populate ``s3_key_sprite`` / ``s3_key_sprite_vtt`` for videos
+    that were transcoded before this feature shipped. Called manually:
+
+        from apps.api.tasks.transcode_tasks import regenerate_sprite
+        for mf_id in media_file_ids_missing_sprite:
+            regenerate_sprite.delay(str(mf_id))
+    """
+    db = SessionLocal()
+    try:
+        mf = db.query(MediaFile).filter(MediaFile.id == uuid.UUID(media_file_id)).first()
+        if not mf or not mf.s3_key_raw or not mf.duration_seconds:
+            return
+        version = db.query(AssetVersion).filter(AssetVersion.id == mf.version_id).first()
+        if not version:
+            return
+        asset = db.query(Asset).filter(Asset.id == version.asset_id).first()
+        if not asset:
+            return
+        output_prefix = f"processed/{asset.project_id}/{asset.id}/{version.id}"
+        sprite_key, vtt_key = _generate_sprite(
+            s3=get_s3_client(),
+            input_s3_key=mf.s3_key_raw,
+            output_prefix=output_prefix,
+            duration_seconds=mf.duration_seconds,
+        )
+        mf.s3_key_sprite = sprite_key
+        mf.s3_key_sprite_vtt = vtt_key
+        db.commit()
+    except Exception as exc:
+        try:
+            raise self.retry(exc=exc)
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 
 def _publish_event(project_id: str, event_type: str, payload: dict):

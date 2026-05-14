@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { cn, formatBytes, formatEta, formatRelativeTime, formatSpeed } from '@/lib/utils'
 import { useUploadStore, type UploadFile, type UploadStatus } from '@/stores/upload-store'
+import Link from 'next/link'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -115,7 +116,17 @@ function UploadItem({ upload }: { upload: UploadFile }) {
       {/* Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <p className="text-sm font-medium text-text-primary truncate flex-1">{upload.assetName}</p>
+          {upload.assetId ? (
+            <Link
+              href={`/projects/${upload.projectId}/assets/${upload.assetId}`}
+              className="text-sm font-medium text-text-primary truncate flex-1 hover:underline hover:text-accent transition-colors"
+              title={`Open ${upload.assetName}`}
+            >
+              {upload.assetName}
+            </Link>
+          ) : (
+            <p className="text-sm font-medium text-text-primary truncate flex-1">{upload.assetName}</p>
+          )}
           <StatusBadge status={upload.status} />
         </div>
         <p className="text-xs text-text-tertiary truncate mt-0.5">

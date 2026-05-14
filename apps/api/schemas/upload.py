@@ -31,7 +31,7 @@ ALLOWED_DOCUMENT_EXTENSIONS = {".md", ".markdown"}
 # 5 MB is generous and blocks accidentally large attachments.
 MAX_DOCUMENT_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
+MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024 * 1024  # 200 GB
 CHUNK_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 def mime_to_asset_type(mime_type: str, filename: str | None = None) -> AssetType:

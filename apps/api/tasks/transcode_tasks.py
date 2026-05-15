@@ -113,9 +113,8 @@ def _process_video(db, asset, version, media_file, s3, output_prefix):
     try:
         sprite_key, vtt_key = _generate_sprite(
             s3=s3,
-            input_s3_key=media_file.s3_key_raw,
+            hls_prefix=result.hls_prefix,
             output_prefix=output_prefix,
-            duration_seconds=media_file.duration_seconds or (result.duration_seconds if hasattr(result, "duration_seconds") else None),
         )
         media_file.s3_key_sprite = sprite_key
         media_file.s3_key_sprite_vtt = vtt_key
@@ -142,95 +141,111 @@ def _process_image(db, asset, version, media_file, s3, output_prefix):
     db.flush()
 
 
-def _ffprobe_duration(s3, input_s3_key: str) -> float | None:
-    """Run ffprobe against a presigned R2 URL to extract media duration.
+def _list_hls_playlist(s3, hls_prefix: str) -> tuple[str, str]:
+    """Find a playlist.m3u8 under the processed HLS prefix.
 
-    Returns the duration in seconds, or None if probing fails for any reason
-    (network, malformed file, ffprobe missing, etc.).
+    Prefers 720p over 1080p (faster decode), falls back to whatever exists.
+    Returns (playlist_key, segment_prefix) where segment_prefix is the
+    parent S3 prefix of segment files referenced in the playlist.
     """
-    try:
-        input_url = s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": settings.s3_bucket, "Key": input_s3_key},
-            ExpiresIn=3600,
-        )
-        out = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                input_url,
-            ],
-            check=True, capture_output=True, timeout=60, text=True,
-        )
-        return float(out.stdout.strip())
-    except Exception:
-        return None
+    candidates = [
+        f"{hls_prefix.rstrip('/')}/720p/playlist.m3u8",
+        f"{hls_prefix.rstrip('/')}/hls/720p/playlist.m3u8",
+        f"{hls_prefix.rstrip('/')}/1080p/playlist.m3u8",
+        f"{hls_prefix.rstrip('/')}/hls/1080p/playlist.m3u8",
+    ]
+    for key in candidates:
+        try:
+            s3.head_object(Bucket=settings.s3_bucket, Key=key)
+            return key, key.rsplit("/", 1)[0]
+        except Exception:
+            continue
+    raise RuntimeError(f"no HLS playlist found under {hls_prefix}")
 
 
-def _generate_sprite(s3, input_s3_key: str, output_prefix: str, duration_seconds: float | None) -> tuple[str, str]:
+def _generate_sprite(s3, hls_prefix: str, output_prefix: str) -> tuple[str, str]:
     """Generate sprite-sheet JPG + WebVTT track for hover-scrub preview.
 
-    Strategy:
-      1. Stream raw input from S3 via presigned URL (no full local copy).
-      2. ffmpeg picks ``GRID*GRID`` (default 10x10 = 100) evenly spaced
-         frames, scales each to TILE_W x TILE_H, and tiles them into a
-         single JPG.
-      3. Build a WebVTT track that maps each timestamp range
-         ``[i*step, (i+1)*step)`` to the tile at row=i//GRID col=i%GRID
-         via the ``#xywh=`` media-fragment URI syntax.
+    Strategy (HLS-based):
+      1. Locate a processed HLS playlist (720p preferred — fast decode).
+      2. Parse EXTINF entries to derive segment list + total duration.
+      3. Download all segments locally (small, ~250 KB each, edge-cached).
+      4. Run ffmpeg on the local playlist to extract evenly-spaced frames
+         and tile them into a single JPG.
+      5. Build a WebVTT track mapping each timestamp range to its tile via
+         the `#xywh=` media-fragment URI syntax.
+
+    Why HLS instead of raw input: raw MP4 can be 1-10 GB and lives behind
+    CloudFront; the old code timed out at 600s on long files because the
+    whole stream had to be re-read end-to-end through the CDN. HLS segments
+    are pre-encoded for fast random-access decode (2-second GOP, 720p), so
+    the same operation runs in 5-30s.
 
     Returns ``(sprite_s3_key, vtt_s3_key)``. Raises on failure.
-
-    The chosen 10x10 / 160x90 px tile gives:
-      sprite size  ~1.5 MB
-      VTT size     ~10 KB
-      total cost   <2 MB per video.
-    Cheaper than one HLS segment.
     """
-    if not duration_seconds or duration_seconds <= 0:
-        # Fallback: probe the source file directly. Used when the upstream
-        # pipeline doesn't populate media_file.duration_seconds (which is the
-        # case for the current FFmpegTranscoder; see _process_video).
-        duration_seconds = _ffprobe_duration(s3, input_s3_key)
-        if not duration_seconds or duration_seconds <= 0:
-            raise RuntimeError("could not determine duration via ffprobe either")
-
     GRID = 10
     TILE_W = 160
     TILE_H = 90
     n_frames = GRID * GRID
-    step = duration_seconds / n_frames  # seconds between captured frames
 
-    # Get a presigned read URL so ffmpeg can stream directly from R2.
-    input_url = s3.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": settings.s3_bucket, "Key": input_s3_key},
-        ExpiresIn=3600,
-    )
+    playlist_key, segment_s3_prefix = _list_hls_playlist(s3, hls_prefix)
+    playlist_text = s3.get_object(Bucket=settings.s3_bucket, Key=playlist_key)["Body"].read().decode()
+
+    durations = []
+    segments = []
+    for line in playlist_text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXTINF:"):
+            # format: #EXTINF:<duration>,<title>
+            durations.append(float(line.split(":", 1)[1].split(",", 1)[0]))
+        elif line and not line.startswith("#"):
+            segments.append(line)
+
+    if not segments or not durations:
+        raise RuntimeError(f"playlist {playlist_key} has no segments")
+
+    total_duration = sum(durations)
+    if total_duration <= 0:
+        raise RuntimeError(f"playlist {playlist_key} reports zero duration")
+
+    step = total_duration / n_frames
 
     with tempfile.TemporaryDirectory() as tmp:
-        sprite_path = Path(tmp) / "sprite.jpg"
-        vtt_path = Path(tmp) / "sprite.vtt"
+        tmp_path = Path(tmp)
+        # 1. Download every segment locally (preserves relative names so the
+        #    playlist resolves correctly when ffmpeg reads it).
+        for seg_name in segments:
+            seg_key = f"{segment_s3_prefix}/{seg_name}"
+            local = tmp_path / seg_name
+            local.parent.mkdir(parents=True, exist_ok=True)
+            with local.open("wb") as f:
+                f.write(s3.get_object(Bucket=settings.s3_bucket, Key=seg_key)["Body"].read())
 
-        # ffmpeg expression: 1 frame every ``step`` seconds, scale, tile.
-        # ``-frames:v 1`` to write a single output image (the tiled mosaic).
+        # 2. Write a local copy of the playlist next to the segments.
+        local_playlist = tmp_path / "playlist.m3u8"
+        local_playlist.write_text(playlist_text)
+
+        sprite_path = tmp_path / "sprite.jpg"
+        vtt_path = tmp_path / "sprite.vtt"
+
+        # 3. Tile.
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-            "-i", input_url,
+            "-allowed_extensions", "ALL",
+            "-i", str(local_playlist),
             "-vf", f"fps=1/{step:.6f},scale={TILE_W}:{TILE_H}:force_original_aspect_ratio=decrease,pad={TILE_W}:{TILE_H}:(ow-iw)/2:(oh-ih)/2:color=black,tile={GRID}x{GRID}",
             "-frames:v", "1",
-            "-q:v", "5",  # JPG quality 1-31, lower=better; 5 ~= 80-85% q
+            "-q:v", "5",
             str(sprite_path),
         ]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
 
-        # WebVTT: one cue per tile, mapping `step` of seconds to the tile rect.
+        # 4. Build VTT.
         with vtt_path.open("w") as f:
             f.write("WEBVTT\n\n")
             for i in range(n_frames):
                 start = i * step
-                end = min((i + 1) * step, duration_seconds)
+                end = min((i + 1) * step, total_duration)
                 col = i % GRID
                 row = i // GRID
                 x = col * TILE_W
@@ -274,7 +289,7 @@ def regenerate_sprite(self, media_file_id: str):
     db = SessionLocal()
     try:
         mf = db.query(MediaFile).filter(MediaFile.id == uuid.UUID(media_file_id)).first()
-        if not mf or not mf.s3_key_raw or not mf.duration_seconds:
+        if not mf or not mf.s3_key_processed:
             return
         version = db.query(AssetVersion).filter(AssetVersion.id == mf.version_id).first()
         if not version:
@@ -285,9 +300,8 @@ def regenerate_sprite(self, media_file_id: str):
         output_prefix = f"processed/{asset.project_id}/{asset.id}/{version.id}"
         sprite_key, vtt_key = _generate_sprite(
             s3=get_s3_client(),
-            input_s3_key=mf.s3_key_raw,
+            hls_prefix=mf.s3_key_processed,
             output_prefix=output_prefix,
-            duration_seconds=mf.duration_seconds,
         )
         mf.s3_key_sprite = sprite_key
         mf.s3_key_sprite_vtt = vtt_key

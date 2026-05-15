@@ -148,11 +148,16 @@ def _list_hls_playlist(s3, hls_prefix: str) -> tuple[str, str]:
     Returns (playlist_key, segment_prefix) where segment_prefix is the
     parent S3 prefix of segment files referenced in the playlist.
     """
+    # FFmpegTranscoder writes one subdir per -map index (via -var_stream_map
+    # v:0,a:0 v:1,a:1 ...), not per quality name. With the qualities list
+    # ["1080p", "720p"] (or ["1080p", "720p", "360p"] on legacy files),
+    # index 1 is always 720p — that's the sweet spot for sprite decode
+    # (small segments, fast). Fall back through 0 (1080p) and 2 (360p)
+    # in case the file was transcoded with a different ladder.
     candidates = [
-        f"{hls_prefix.rstrip('/')}/720p/playlist.m3u8",
-        f"{hls_prefix.rstrip('/')}/hls/720p/playlist.m3u8",
-        f"{hls_prefix.rstrip('/')}/1080p/playlist.m3u8",
-        f"{hls_prefix.rstrip('/')}/hls/1080p/playlist.m3u8",
+        f"{hls_prefix.rstrip('/')}/1/playlist.m3u8",
+        f"{hls_prefix.rstrip('/')}/0/playlist.m3u8",
+        f"{hls_prefix.rstrip('/')}/2/playlist.m3u8",
     ]
     for key in candidates:
         try:

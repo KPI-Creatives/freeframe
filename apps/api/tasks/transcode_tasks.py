@@ -96,7 +96,7 @@ def _process_video(db, asset, version, media_file, s3, output_prefix):
         version_id=str(version.id),
         input_s3_key=media_file.s3_key_raw,
         output_s3_prefix=output_prefix,
-        qualities=["1080p", "720p", "360p"],
+        qualities=["1080p", "720p"],
     )
     result = _run_async(transcoder.transcode(job))
     if not result.success:
@@ -142,6 +142,32 @@ def _process_image(db, asset, version, media_file, s3, output_prefix):
     db.flush()
 
 
+def _ffprobe_duration(s3, input_s3_key: str) -> float | None:
+    """Run ffprobe against a presigned R2 URL to extract media duration.
+
+    Returns the duration in seconds, or None if probing fails for any reason
+    (network, malformed file, ffprobe missing, etc.).
+    """
+    try:
+        input_url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": settings.s3_bucket, "Key": input_s3_key},
+            ExpiresIn=3600,
+        )
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                input_url,
+            ],
+            check=True, capture_output=True, timeout=60, text=True,
+        )
+        return float(out.stdout.strip())
+    except Exception:
+        return None
+
+
 def _generate_sprite(s3, input_s3_key: str, output_prefix: str, duration_seconds: float | None) -> tuple[str, str]:
     """Generate sprite-sheet JPG + WebVTT track for hover-scrub preview.
 
@@ -163,7 +189,12 @@ def _generate_sprite(s3, input_s3_key: str, output_prefix: str, duration_seconds
     Cheaper than one HLS segment.
     """
     if not duration_seconds or duration_seconds <= 0:
-        raise RuntimeError("duration_seconds required for sprite generation")
+        # Fallback: probe the source file directly. Used when the upstream
+        # pipeline doesn't populate media_file.duration_seconds (which is the
+        # case for the current FFmpegTranscoder; see _process_video).
+        duration_seconds = _ffprobe_duration(s3, input_s3_key)
+        if not duration_seconds or duration_seconds <= 0:
+            raise RuntimeError("could not determine duration via ffprobe either")
 
     GRID = 10
     TILE_W = 160

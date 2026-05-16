@@ -96,7 +96,7 @@ def _process_video(db, asset, version, media_file, s3, output_prefix):
         version_id=str(version.id),
         input_s3_key=media_file.s3_key_raw,
         output_s3_prefix=output_prefix,
-        qualities=["1080p", "720p"],
+        qualities=["1080p", "720p", "360p"],
     )
     result = _run_async(transcoder.transcode(job))
     if not result.success:

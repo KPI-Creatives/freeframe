@@ -99,20 +99,6 @@ services:
       - "8000"
     restart: unless-stopped
 
-  worker:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile.prod
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: sh -c "celery -A apps.api.tasks.celery_app worker -Q transcoding -c $${TRANSCODING_CONCURRENCY:-2} --loglevel=warning"
-    restart: unless-stopped
-
   email_worker:
     build:
       context: .
